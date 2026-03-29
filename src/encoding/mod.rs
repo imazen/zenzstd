@@ -7,6 +7,7 @@ pub(crate) mod frame_header;
 pub(crate) mod hash;
 pub(crate) mod match_generator;
 pub(crate) mod util;
+pub mod zstd_match;
 
 mod frame_compressor;
 mod levels;
