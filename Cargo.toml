@@ -1,0 +1,30 @@
+[package]
+name = "zenzstd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Pure Rust Zstandard (zstd) compression and decompression — forbid(unsafe_code), no_std+alloc"
+repository = "https://github.com/imazen/zenzstd"
+keywords = ["zstd", "zstandard", "compression", "decompression"]
+categories = ["compression"]
+
+[features]
+default = ["hash", "std"]
+std = []
+hash = []
+dict_builder = ["std", "dep:fastrand"]
+fuzz_exports = []
+
+[dependencies]
+fastrand = { version = "2.3.0", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+rand = { version = "0.9.0", features = ["small_rng"] }
+zstd = "0.13.3"
+
+[[bench]]
+name = "decode_all"
+path = "benches/decode_all.rs"
+harness = false
