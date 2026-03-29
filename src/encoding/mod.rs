@@ -2,7 +2,9 @@
 
 pub(crate) mod block_header;
 pub(crate) mod blocks;
+pub mod compress_params;
 pub(crate) mod frame_header;
+pub(crate) mod hash;
 pub(crate) mod match_generator;
 pub(crate) mod util;
 
