@@ -29,9 +29,14 @@ hash = []
 dict_builder = ["std", "dep:fastrand"]
 fuzz_exports = []
 simd = ["dep:archmage", "dep:magetypes"]
+# Unsafe optimizations — opt-in only. These use unchecked indexing and raw
+# pointer copies in hot paths to eliminate bounds checks. All unsafe code is
+# isolated in `unsafe_ops` modules with safety invariants documented.
+unsafe-decompress = []
+unsafe-compress = []
 
 [lints.rust]
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("avx512"))'] }
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("avx512", "unsafe-decompress", "unsafe-compress"))'] }
 
 [dependencies]
 fastrand = { version = "2.3.0", optional = true }

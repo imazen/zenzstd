@@ -14,7 +14,18 @@
 //! functions or [`encoding::FrameCompressor`]
 //!
 #![no_std]
-#![forbid(unsafe_code)]
+// Safe by default. The `unsafe-decompress` and `unsafe-compress` features
+// enable targeted unsafe optimizations in hot paths (unchecked indexing,
+// raw pointer copies). All unsafe code is isolated in `unsafe_ops` modules
+// and only active when the feature is explicitly opted into.
+#![cfg_attr(
+    not(any(feature = "unsafe-decompress", feature = "unsafe-compress")),
+    forbid(unsafe_code)
+)]
+#![cfg_attr(
+    any(feature = "unsafe-decompress", feature = "unsafe-compress"),
+    deny(unsafe_code)
+)]
 #![deny(trivial_casts, trivial_numeric_casts)]
 
 #[cfg(feature = "std")]

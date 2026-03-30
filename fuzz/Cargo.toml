@@ -1,42 +1,47 @@
-
 [package]
-name = "ruzstd-fuzz"
-version = "0.0.1"
-authors = ["Automatically generated"]
+name = "zenzstd-fuzz"
+version = "0.0.0"
 publish = false
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
-zstd = "0.5.1+zstd.1.4.4"
-
-[dependencies.ruzstd]
-path = ".."
-features = ["fuzz_exports"]
-[dependencies.libfuzzer-sys]
-git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
+libfuzzer-sys = "0.4.12"
+zenzstd = { path = "..", features = ["hash", "std", "dict_builder", "fuzz_exports"] }
+arbitrary = { version = "1.4.2", features = ["derive"] }
 
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]
 
 [[bin]]
-name = "decode"
-path = "fuzz_targets/decode.rs"
+name = "fuzz_decode"
+path = "fuzz_targets/fuzz_decode.rs"
+doc = false
 
 [[bin]]
-name = "encode"
-path = "fuzz_targets/encode.rs"
+name = "fuzz_roundtrip"
+path = "fuzz_targets/fuzz_roundtrip.rs"
+doc = false
 
 [[bin]]
-name = "interop"
-path = "fuzz_targets/interop.rs"
+name = "fuzz_streaming_roundtrip"
+path = "fuzz_targets/fuzz_streaming_roundtrip.rs"
+doc = false
 
 [[bin]]
-name = "huff0"
-path = "fuzz_targets/huff0.rs"
+name = "fuzz_dict_roundtrip"
+path = "fuzz_targets/fuzz_dict_roundtrip.rs"
+doc = false
 
 [[bin]]
-name = "fse"
-path = "fuzz_targets/fse.rs"
+name = "fuzz_huff0"
+path = "fuzz_targets/fuzz_huff0.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_fse"
+path = "fuzz_targets/fuzz_fse.rs"
+doc = false

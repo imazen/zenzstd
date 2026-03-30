@@ -801,8 +801,12 @@ fn fused_decode_execute_fast_inner(
                 }
                 .into());
             }
-            buffer.buffer.buf[pos..pos + ll]
-                .copy_from_slice(&literals_buffer[literals_copy_counter..high]);
+            use super::unsafe_ops;
+            unsafe_ops::copy_to_buf(
+                &mut buffer.buffer.buf,
+                pos,
+                &literals_buffer[literals_copy_counter..high],
+            );
             pos += ll;
             total_out += ll as u64;
             literals_copy_counter += ll;
@@ -820,14 +824,14 @@ fn fused_decode_execute_fast_inner(
             return Err(ExecuteSequencesError::ZeroOffset.into());
         }
 
-        // Copy match — direct buf operations, no method call overhead
+        // Copy match — use unsafe_ops for hot path when feature enabled
         if ml > 0 {
-            let buf_len = pos - drain_pos; // logical length of buffer content
+            use super::unsafe_ops;
+            let buf_len = pos - drain_pos;
             let actual_off = actual_offset as usize;
 
             if actual_off > buf_len {
                 // Cold path: match references dictionary content.
-                // Write back state, delegate to DecodeBuffer method, re-hoist.
                 buffer.buffer.pos = pos;
                 buffer.total_output_counter = total_out;
                 offset_hist[0] = off1;
@@ -837,30 +841,34 @@ fn fused_decode_execute_fast_inner(
                 pos = buffer.buffer.pos;
                 total_out = buffer.total_output_counter;
             } else {
-                // Hot path: match is within the buffer — direct copy
+                // Hot path: match is within the buffer
                 let src_abs = drain_pos + (buf_len - actual_off);
                 let distance = pos - src_abs;
 
                 if distance >= ml {
-                    // Non-overlapping: single copy_within
-                    buffer.buffer.buf.copy_within(src_abs..src_abs + ml, pos);
+                    // Non-overlapping
+                    unsafe_ops::copy_within_buf(&mut buffer.buffer.buf, src_abs, pos, ml);
                 } else if distance == 1 {
-                    // RLE: fill with repeated byte
-                    let byte = buffer.buffer.buf[src_abs];
-                    buffer.buffer.buf[pos..pos + ml].fill(byte);
+                    // RLE
+                    let byte = unsafe_ops::read_byte(&buffer.buffer.buf, src_abs);
+                    unsafe_ops::fill_buf(&mut buffer.buffer.buf, pos, ml, byte);
                 } else {
                     // Overlapping: doubling copy
-                    buffer
-                        .buffer
-                        .buf
-                        .copy_within(src_abs..src_abs + distance, pos);
+                    unsafe_ops::copy_within_buf(
+                        &mut buffer.buffer.buf,
+                        src_abs,
+                        pos,
+                        distance,
+                    );
                     let mut written = distance;
                     while written < ml {
                         let copy_len = written.min(ml - written);
-                        buffer
-                            .buffer
-                            .buf
-                            .copy_within(pos..pos + copy_len, pos + written);
+                        unsafe_ops::copy_within_buf(
+                            &mut buffer.buffer.buf,
+                            pos,
+                            pos + written,
+                            copy_len,
+                        );
                         written += copy_len;
                     }
                 }

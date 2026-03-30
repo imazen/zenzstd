@@ -574,6 +574,8 @@ fn test_decode_all() {
 }
 
 pub mod bit_reader;
+#[cfg(feature = "std")]
+pub mod conformance;
 pub mod decode_corpus;
 pub mod dict_test;
 #[cfg(feature = "std")]
