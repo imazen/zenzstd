@@ -49,6 +49,21 @@ impl<'t> FSEDecoder<'t> {
         let new_state = base_line + add as u32;
         self.state = self.table.decode[new_state as usize];
     }
+
+    /// Read the number of bits needed for the state update and return (num_bits, base_line).
+    /// The caller can batch the bit reads.
+    #[inline(always)]
+    pub fn state_update_params(&self) -> (u8, u32) {
+        (self.state.num_bits, self.state.base_line)
+    }
+
+    /// Apply a pre-read bit value to update state. `add` is the value previously read
+    /// using `state_update_params().0` bits.
+    #[inline(always)]
+    pub fn apply_state_update(&mut self, add: u64) {
+        let new_state = self.state.base_line + add as u32;
+        self.state = self.table.decode[new_state as usize];
+    }
 }
 
 /// FSE decoding involves a decoding table that describes the probabilities of

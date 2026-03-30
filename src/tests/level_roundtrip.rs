@@ -336,6 +336,70 @@ fn test_cross_block_history_roundtrip() {
     }
 }
 
+/// Regression test: 1MB repetitive text at L5/L7 must produce < 500 bytes.
+///
+/// Previously this produced 2662 bytes due to two bugs:
+/// 1. Hash/chain tables were cleared between blocks, losing cross-block entries
+/// 2. Block splitter false-split uniform data due to sampling aliasing at rate=5
+///
+/// C zstd produces ~148 bytes. We target < 500 bytes (allowing for per-block
+/// entropy table overhead in our 8-block encoding).
+#[test]
+fn test_cross_block_l5_1mb_text() {
+    use alloc::vec::Vec;
+    use std::io::Cursor;
+
+    let phrase = b"The quick brown fox jumps over the lazy dog. ";
+    let size = 1_000_000;
+    let mut data = Vec::with_capacity(size);
+    while data.len() < size {
+        let remaining = size - data.len();
+        let chunk = remaining.min(phrase.len());
+        data.extend_from_slice(&phrase[..chunk]);
+    }
+
+    for level in [5, 7] {
+        let compressed = crate::encoding::compress_to_vec(
+            Cursor::new(&data),
+            crate::encoding::CompressionLevel::Level(level),
+        );
+
+        assert!(
+            compressed.len() < 500,
+            "L{level}: 1MB repetitive text compressed to {} bytes (expected < 500)",
+            compressed.len(),
+        );
+
+        // Verify round-trip correctness
+        let mut decoded = Vec::new();
+        zstd::stream::copy_decode(compressed.as_slice(), &mut decoded).unwrap();
+        assert_eq!(data, decoded, "L{level}: round-trip mismatch");
+    }
+}
+
+/// Verify block splitter does not false-split uniform repetitive text.
+#[test]
+fn test_block_splitter_no_false_splits_on_repetitive() {
+    use alloc::vec::Vec;
+    let phrase = b"The quick brown fox jumps over the lazy dog. ";
+    let mut data = Vec::with_capacity(128 * 1024);
+    while data.len() < 128 * 1024 {
+        let remaining = 128 * 1024 - data.len();
+        let chunk = remaining.min(phrase.len());
+        data.extend_from_slice(&phrase[..chunk]);
+    }
+    // All levels should produce 1 sub-block for uniform repetitive data
+    for level in [3, 5, 7, 9, 11, 15] {
+        let boundaries = crate::encoding::block_splitter::find_split_points(&data, level);
+        assert_eq!(
+            boundaries.len(),
+            2,
+            "L{level}: expected 1 sub-block for repetitive text, got {}",
+            boundaries.len() - 1
+        );
+    }
+}
+
 /// Test that cross-block history improves compression ratio compared to
 /// per-block independent compression for data with inter-block repetitions.
 #[test]

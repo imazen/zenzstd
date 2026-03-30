@@ -106,18 +106,17 @@ fn compress_benchmarks(suite: &mut Suite) {
 
 fn decompress_benchmarks(suite: &mut Suite) {
     let text_100k = make_text(100_000);
+    let mixed_100k = make_mixed(100_000);
 
-    // Pre-compress
-    let c_compressed = zstd::stream::encode_all(Cursor::new(&text_100k), 3).unwrap();
-    let zen_compressed = zenzstd::encoding::compress_to_vec(
-        Cursor::new(&text_100k),
-        zenzstd::encoding::CompressionLevel::Level(3),
-    );
+    // Pre-compress both datasets with C zstd (for fair apples-to-apples decode comparison)
+    let text_compressed = zstd::stream::encode_all(Cursor::new(&text_100k), 3).unwrap();
+    let mixed_compressed = zstd::stream::encode_all(Cursor::new(&mixed_100k), 3).unwrap();
 
+    // --- Text decode (long matches, few sequences) ---
     suite.group("decompress_text_100k", |g| {
         g.throughput(Throughput::Bytes(100_000));
 
-        let cc = c_compressed.clone();
+        let cc = text_compressed.clone();
         g.bench("zenzstd_decode", move |b| {
             let cc = cc.clone();
             b.iter(move || {
@@ -128,7 +127,33 @@ fn decompress_benchmarks(suite: &mut Suite) {
             })
         });
 
-        let cc = c_compressed.clone();
+        let cc = text_compressed.clone();
+        g.bench("c_zstd_decode", move |b| {
+            let cc = cc.clone();
+            b.iter(move || {
+                let mut out = Vec::with_capacity(100_000);
+                zstd::stream::copy_decode(cc.as_slice(), &mut out).unwrap();
+                black_box(out)
+            })
+        });
+    });
+
+    // --- Mixed decode (many short matches, high per-sequence overhead) ---
+    suite.group("decompress_mixed_100k", |g| {
+        g.throughput(Throughput::Bytes(100_000));
+
+        let cc = mixed_compressed.clone();
+        g.bench("zenzstd_decode", move |b| {
+            let cc = cc.clone();
+            b.iter(move || {
+                let mut dec = zenzstd::decoding::FrameDecoder::new();
+                let mut target = vec![0u8; 100_000 + 4096];
+                dec.decode_all(&cc, &mut target).unwrap();
+                black_box(target)
+            })
+        });
+
+        let cc = mixed_compressed.clone();
         g.bench("c_zstd_decode", move |b| {
             let cc = cc.clone();
             b.iter(move || {

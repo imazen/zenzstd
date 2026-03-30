@@ -57,13 +57,45 @@ impl DecodeBuffer {
         self.buffer.len()
     }
 
-    #[inline]
+    /// Pre-reserve space in the ring buffer to avoid per-operation reserve calls.
+    #[inline(always)]
+    pub fn reserve(&mut self, amount: usize) {
+        self.buffer.reserve(amount);
+    }
+
+    #[inline(always)]
     pub fn push(&mut self, data: &[u8]) {
         self.buffer.extend(data);
         self.total_output_counter += data.len() as u64;
     }
 
-    #[inline]
+    /// Push literals without checking capacity. Caller must ensure space was pre-reserved.
+    #[inline(always)]
+    pub fn push_no_reserve(&mut self, data: &[u8]) {
+        self.buffer.extend_no_reserve(data);
+        self.total_output_counter += data.len() as u64;
+    }
+
+    /// Match copy without checking capacity. Caller must ensure space was pre-reserved.
+    #[inline(always)]
+    pub fn repeat_no_reserve(
+        &mut self,
+        offset: usize,
+        match_length: usize,
+    ) -> Result<(), DecodeBufferError> {
+        if offset > self.buffer.len() {
+            self.repeat_from_dict(offset, match_length)
+        } else {
+            let buf_len = self.buffer.len();
+            let start_idx = buf_len - offset;
+            self.buffer
+                .extend_from_within_no_reserve(start_idx, match_length);
+            self.total_output_counter += match_length as u64;
+            Ok(())
+        }
+    }
+
+    #[inline(always)]
     pub fn repeat(&mut self, offset: usize, match_length: usize) -> Result<(), DecodeBufferError> {
         if offset > self.buffer.len() {
             self.repeat_from_dict(offset, match_length)

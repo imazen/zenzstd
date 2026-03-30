@@ -58,12 +58,11 @@ zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 
 ## Known Issues
 
-### Cross-block L5/L7 regression on 1MB repetitive text
-L5/L7 produce 2662 bytes on 1MB text vs C's 148. The cross-block hash chain match finder
-doesn't find optimal matches when the window is much larger than the block. This needs
-absolute-position tracking across blocks (base_offset that increases per block) instead of
-the current concatenate-window-and-block approach. L9+ (Lazy2) work correctly because
-the deeper chain walk compensates.
+### ~~Cross-block L5/L7 regression on 1MB repetitive text~~ FIXED
+Fixed in two parts: (1) persistent hash/chain tables across blocks via position shifting
+instead of clearing/repopulating each block; (2) block splitter sampling rate fix to avoid
+false splits on uniform repetitive data due to phase-offset aliasing at rate=5.
+Result: 1MB text at L5/L7 now produces 247 bytes (down from 2662), vs C's 148.
 
 ### L16-22 compression ratio gap (zen/c = 1.17 on mixed_100KB)
 FSE table mode selection and Huffman literal threshold have been fixed:

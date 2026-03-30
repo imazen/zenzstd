@@ -38,8 +38,10 @@ impl<'s> BitReaderReversed<'s> {
         }
     }
 
-    /// We refill the container in full bytes, shifting the still unread portion to the left, and filling the lower bits with new data
-    #[cold]
+    /// Refill the bit container from source bytes.
+    /// Fast path: when at least `bytes_consumed` bytes remain in the source,
+    /// this is just an index subtract + an 8-byte load.
+    #[inline(always)]
     fn refill(&mut self) {
         let bytes_consumed = self.bits_consumed as usize / 8;
         if bytes_consumed == 0 {
@@ -47,14 +49,21 @@ impl<'s> BitReaderReversed<'s> {
         }
 
         if self.index >= bytes_consumed {
-            // We can safely move the window contained in `bit_container` down by `bytes_consumed`
-            // If the reader wasn't byte aligned, the byte that was partially read is now in the highest order bits in the `bit_container`
+            // Fast path: plenty of source remaining. This is the common case.
             self.index -= bytes_consumed;
-            // Some bits of the `bits_container` might have been consumed already because we read the window byte aligned
             self.bits_consumed &= 7;
             self.bit_container =
                 u64::from_le_bytes((&self.source[self.index..][..8]).try_into().unwrap());
-        } else if self.index > 0 {
+        } else {
+            self.refill_slow();
+        }
+    }
+
+    /// Cold slow path for refill when we're near the end of the source.
+    #[cold]
+    #[inline(never)]
+    fn refill_slow(&mut self) {
+        if self.index > 0 {
             // Read the last portion of source into the `bit_container`
             if self.source.len() >= 8 {
                 self.bit_container = u64::from_le_bytes((&self.source[..8]).try_into().unwrap());
@@ -76,7 +85,7 @@ impl<'s> BitReaderReversed<'s> {
             self.extra_bits += self.bits_consumed as usize;
             self.bits_consumed = 0;
         } else {
-            // All useful bits have already been read and more than 64 bits have been consumed, all we now do is return zeroes
+            // All useful bits have already been read, return zeroes
             self.extra_bits += self.bits_consumed as usize;
             self.bits_consumed = 0;
             self.bit_container = 0;
@@ -151,7 +160,10 @@ impl<'s> BitReaderReversed<'s> {
     pub fn get_bits_triple(&mut self, n1: u8, n2: u8, n3: u8) -> (u64, u64, u64) {
         let sum = n1 + n2 + n3;
         if sum <= 56 {
-            self.refill();
+            // Only refill if we actually need more bits
+            if self.bits_consumed + sum > 64 {
+                self.refill();
+            }
 
             let triple = self.peek_bits_triple(sum, n1, n2, n3);
             self.consume(sum);

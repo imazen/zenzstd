@@ -578,6 +578,13 @@ pub struct MatchState {
     table_hash_log2: u32,
     /// Current chain_log the chain table is sized for.
     table_chain_log: u32,
+    /// Length of the combined buffer (window + src) used in the previous
+    /// compression call. Used to compute the shift when adjusting table
+    /// entries for cross-block persistence.
+    prev_combined_len: usize,
+    /// Whether the hash/chain tables contain valid entries from a previous block.
+    /// When true, we shift entries instead of clearing and repopulating.
+    tables_populated: bool,
 }
 
 impl MatchState {
@@ -593,6 +600,8 @@ impl MatchState {
             table_hash_log: 0,
             table_hash_log2: 0,
             table_chain_log: 0,
+            prev_combined_len: 0,
+            tables_populated: false,
         }
     }
 
@@ -601,6 +610,8 @@ impl MatchState {
         self.window.clear();
         self.window_size = params.window_size();
         self.rep_offsets = [1, 4, 8];
+        self.prev_combined_len = 0;
+        self.tables_populated = false;
     }
 
     /// Ensure the hash table is sized for `hash_log`, clearing it.
@@ -659,23 +670,70 @@ impl MatchState {
     }
 
     /// Compress a block using persistent cross-block state.
+    ///
+    /// Cross-block matching works by keeping hash/chain table entries valid
+    /// across blocks. Instead of clearing the tables each block and
+    /// repopulating from the window prefix (which loses fine-grained chain
+    /// entries), we shift existing entries to account for the buffer layout
+    /// change between blocks.
+    ///
+    /// Between blocks, the combined buffer changes from
+    /// `[old_window | old_src]` to `[new_window | new_src]`, where
+    /// `new_window` is the tail of the old combined buffer. The shift amount
+    /// is `prev_combined_len - new_window.len()`: old positions are adjusted
+    /// by this delta, and entries that fall below zero (out of the window)
+    /// are clamped to zero (treated as empty by the match finder).
     pub fn compress_block(&mut self, src: &[u8], params: &CompressionParams) -> CompressedBlock {
-        let empty: &[u8] = &[];
-        let dict_content: &[u8] = if self.window.is_empty() {
-            empty
-        } else {
-            self.window.as_slice()
-        };
-
-        let block = if dict_content.is_empty() {
-            self.compress_block_with_tables(src, params, &[], &self.rep_offsets.clone())
-        } else {
+        let block = if self.window.is_empty() {
+            // First block (no window): clear tables and compress from scratch
             let rep = self.rep_offsets;
-            let dict_len = dict_content.len();
+            let result = self.compress_block_with_tables(src, params, &[], &rep);
+            self.prev_combined_len = src.len();
+            self.tables_populated = true;
+            result
+        } else if self.tables_populated {
+            // Subsequent block with persistent tables: shift entries instead
+            // of clearing and repopulating.
+            let rep = self.rep_offsets;
+            let dict_len = self.window.len();
+            let shift = self.prev_combined_len.saturating_sub(dict_len);
+
+            // Shift hash/chain table entries to account for the buffer trim.
+            // Entries pointing to data that has been trimmed (< shift) become 0.
+            if shift > 0 {
+                let shift32 = shift as u32;
+                for entry in self.hash_table.iter_mut() {
+                    *entry = entry.saturating_sub(shift32);
+                }
+                for entry in self.hash_table2.iter_mut() {
+                    *entry = entry.saturating_sub(shift32);
+                }
+                for entry in self.chain_table.iter_mut() {
+                    *entry = entry.saturating_sub(shift32);
+                }
+            }
+
+            // Build the combined buffer
             let mut combined = Vec::with_capacity(dict_len + src.len());
-            combined.extend_from_slice(dict_content);
+            combined.extend_from_slice(&self.window);
             combined.extend_from_slice(src);
-            self.compress_block_dict_with_tables(&combined, dict_len, params, &rep)
+
+            // Call match finders directly WITHOUT clearing/repopulating tables.
+            let result = self.compress_block_dict_persistent(&combined, dict_len, params, &rep);
+            self.prev_combined_len = combined.len();
+            result
+        } else {
+            // Window is non-empty but tables aren't populated yet (e.g. after
+            // seed_from_dict). Use the standard dict path with table clearing.
+            let rep = self.rep_offsets;
+            let dict_len = self.window.len();
+            let mut combined = Vec::with_capacity(dict_len + src.len());
+            combined.extend_from_slice(&self.window);
+            combined.extend_from_slice(src);
+            let result = self.compress_block_dict_with_tables(&combined, dict_len, params, &rep);
+            self.prev_combined_len = combined.len();
+            self.tables_populated = true;
+            result
         };
 
         self.update_rep_offsets(&block.sequences);
@@ -874,6 +932,120 @@ impl MatchState {
             Strategy::BtOpt | Strategy::BtUltra | Strategy::BtUltra2 => {
                 super::zstd_opt::compress_btopt_dict(combined, dict_len, params, initial_rep)
             }
+        }
+    }
+
+    /// Compress a block with dict prefix, using persistent (shifted) tables.
+    ///
+    /// Unlike `compress_block_dict_with_tables`, this does NOT clear or
+    /// prefill the hash/chain tables. The caller must have already shifted
+    /// existing entries so they are valid for the current combined buffer.
+    /// Tables are only resized if the log parameters changed.
+    fn compress_block_dict_persistent(
+        &mut self,
+        combined: &[u8],
+        dict_len: usize,
+        params: &CompressionParams,
+        initial_rep: &[u32; 3],
+    ) -> CompressedBlock {
+        match params.strategy {
+            Strategy::Fast => {
+                self.ensure_hash_table_no_clear(params.hash_log);
+                super::zstd_fast::compress_fast_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    initial_rep,
+                )
+            }
+            Strategy::DFast => {
+                self.ensure_hash_table_no_clear(params.hash_log);
+                let long_hash_log = params.hash_log.min(27);
+                self.ensure_hash_table2_no_clear(long_hash_log);
+                super::zstd_fast::compress_dfast_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.hash_table2,
+                    initial_rep,
+                )
+            }
+            Strategy::Greedy => {
+                self.ensure_hash_table_no_clear(params.hash_log);
+                self.ensure_chain_table_no_clear(params.chain_log);
+                super::zstd_lazy::compress_greedy_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::Lazy => {
+                self.ensure_hash_table_no_clear(params.hash_log);
+                self.ensure_chain_table_no_clear(params.chain_log);
+                super::zstd_lazy::compress_lazy_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::Lazy2 => {
+                self.ensure_hash_table_no_clear(params.hash_log);
+                self.ensure_chain_table_no_clear(params.chain_log);
+                super::zstd_lazy::compress_lazy2_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::BtLazy2 => {
+                super::zstd_lazy::compress_btlazy2_dict(combined, dict_len, params, initial_rep)
+            }
+            Strategy::BtOpt | Strategy::BtUltra | Strategy::BtUltra2 => {
+                super::zstd_opt::compress_btopt_dict(combined, dict_len, params, initial_rep)
+            }
+        }
+    }
+
+    /// Ensure hash table is sized correctly without clearing existing entries.
+    /// Only clears if the size changed (which means old entries are meaningless anyway).
+    fn ensure_hash_table_no_clear(&mut self, hash_log: u32) {
+        let size = 1usize << hash_log;
+        if self.table_hash_log != hash_log || self.hash_table.len() != size {
+            self.hash_table.resize(size, 0);
+            self.hash_table.fill(0);
+            self.table_hash_log = hash_log;
+        }
+        // Do NOT clear — entries are valid from the previous block (shifted by caller).
+    }
+
+    /// Ensure secondary hash table is sized correctly without clearing.
+    fn ensure_hash_table2_no_clear(&mut self, hash_log: u32) {
+        let size = 1usize << hash_log;
+        if self.table_hash_log2 != hash_log || self.hash_table2.len() != size {
+            self.hash_table2.resize(size, 0);
+            self.hash_table2.fill(0);
+            self.table_hash_log2 = hash_log;
+        }
+    }
+
+    /// Ensure chain table is sized correctly without clearing.
+    fn ensure_chain_table_no_clear(&mut self, chain_log: u32) {
+        let size = 1usize << chain_log;
+        if self.table_chain_log != chain_log || self.chain_table.len() != size {
+            self.chain_table.resize(size, 0);
+            self.chain_table.fill(0);
+            self.table_chain_log = chain_log;
         }
     }
 

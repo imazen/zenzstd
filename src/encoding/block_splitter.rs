@@ -142,7 +142,12 @@ fn split_params(level: u32) -> (usize, u32) {
     match level {
         0 => (43, 8),
         1 => (11, 9),
-        2 => (5, 10),
+        // Level 2 (Greedy/Lazy): use sampling_rate=1 to avoid aliasing
+        // artifacts on repetitive data with short period lengths. At rate=5,
+        // 8KB chunks that start at different phase offsets within a short
+        // repeating pattern produce genuinely different bigram distributions,
+        // causing false split detections on uniform data.
+        2 => (1, 10),
         3 => (1, 10),
         _ => (1, 10),
     }

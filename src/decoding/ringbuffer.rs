@@ -106,7 +106,7 @@ impl RingBuffer {
     }
 
     /// Append the provided data to the end of `self`.
-    #[inline]
+    #[inline(always)]
     pub fn extend(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
@@ -127,6 +127,79 @@ impl RingBuffer {
         }
 
         self.tail = (self.tail + data.len()) & self.mask;
+    }
+
+    /// Append data without checking capacity. Caller must ensure sufficient space
+    /// was pre-reserved.
+    #[inline(always)]
+    pub fn extend_no_reserve(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        debug_assert!(
+            self.free() >= data.len(),
+            "extend_no_reserve: not enough space ({} free, {} needed)",
+            self.free(),
+            data.len()
+        );
+
+        let cap = self.mask + 1;
+        let first_len = cap - self.tail;
+
+        if first_len >= data.len() {
+            self.buf[self.tail..self.tail + data.len()].copy_from_slice(data);
+        } else {
+            self.buf[self.tail..self.tail + first_len].copy_from_slice(&data[..first_len]);
+            let remaining = data.len() - first_len;
+            self.buf[..remaining].copy_from_slice(&data[first_len..]);
+        }
+
+        self.tail = (self.tail + data.len()) & self.mask;
+    }
+
+    /// Copy from within the ring buffer without checking capacity. Caller must ensure
+    /// sufficient space was pre-reserved.
+    #[inline(always)]
+    pub fn extend_from_within_no_reserve(&mut self, start: usize, len: usize) {
+        debug_assert!(
+            start <= self.len(),
+            "start ({start}) > len ({})",
+            self.len()
+        );
+        debug_assert!(
+            self.free() >= len,
+            "extend_from_within_no_reserve: not enough space ({} free, {} needed)",
+            self.free(),
+            len
+        );
+
+        let current_len = self.len();
+        let distance = current_len - start;
+        let cap = self.mask + 1;
+        let src_phys = (self.head + start) & self.mask;
+        let dst_phys = self.tail;
+
+        // Fast path: non-overlapping + both regions contiguous (no ring wrap).
+        if distance >= len && src_phys + len <= cap && dst_phys + len <= cap {
+            self.buf.copy_within(src_phys..src_phys + len, dst_phys);
+            self.tail = (self.tail + len) & self.mask;
+            return;
+        }
+
+        // RLE fast path
+        if distance == 1 {
+            let byte = self.buf[src_phys];
+            let mut remaining = len;
+            while remaining > 0 {
+                let contiguous = (cap - self.tail).min(remaining);
+                self.buf[self.tail..self.tail + contiguous].fill(byte);
+                self.tail = (self.tail + contiguous) & self.mask;
+                remaining -= contiguous;
+            }
+            return;
+        }
+
+        self.do_extend_from_within(start, len);
     }
 
     /// Advance head past `amount` elements, effectively removing them.
@@ -185,13 +258,25 @@ impl RingBuffer {
     /// Caller guarantees distance >= len (no overlap).
     #[inline]
     fn copy_within_non_overlapping(&mut self, start: usize, len: usize) {
+        // Try direct copy_within when both src and dst are contiguous (no wrap).
+        // This avoids the temp buffer entirely for any non-wrapping copy.
+        let cap = self.mask + 1;
+        let src_start = (self.head + start) & self.mask;
+        let dst_start = self.tail;
+
+        if src_start + len <= cap && dst_start + len <= cap {
+            // Source and dest are both contiguous — single copy_within
+            self.buf.copy_within(src_start..src_start + len, dst_start);
+            self.tail = (self.tail + len) & self.mask;
+            return;
+        }
+
+        // Wrapping case: use temp buffer
         if len <= 256 {
-            // Stack-allocated temp buffer for short/medium copies
             let mut tmp = [0u8; 256];
             self.read_at(start, &mut tmp[..len]);
             self.extend_raw(&tmp[..len]);
         } else {
-            // Large copy: heap allocation unavoidable
             let mut tmp = vec![0u8; len];
             self.read_at(start, &mut tmp);
             self.extend_raw(&tmp);
@@ -201,20 +286,43 @@ impl RingBuffer {
     /// Copy a repeating pattern of `distance` bytes, producing `len` total output bytes.
     #[inline]
     fn copy_within_repeating(&mut self, start: usize, distance: usize, len: usize) {
+        // RLE (distance == 1) is handled inline in extend_from_within_unchecked,
+        // but keep it here for callers via extend_from_within.
         if distance == 1 {
-            // RLE: single byte repeated — very common in zstd
             let src_idx = (self.head + start) & self.mask;
             let byte = self.buf[src_idx];
-            // Write directly into ring buffer
             let mut remaining = len;
             while remaining > 0 {
                 let cap = self.mask + 1;
                 let contiguous = (cap - self.tail).min(remaining);
-                // Fill contiguous region with the repeated byte
                 self.buf[self.tail..self.tail + contiguous].fill(byte);
                 self.tail = (self.tail + contiguous) & self.mask;
                 remaining -= contiguous;
             }
+            return;
+        }
+
+        // For small patterns where destination is contiguous, use doubling copy.
+        // Read pattern once, then double it in place: 2->4->8->16->... bytes.
+        // This is much faster than repeated extend_raw calls for common 2-8 byte patterns.
+        let cap = self.mask + 1;
+        if distance <= 32 && self.tail + len <= cap {
+            // Destination is contiguous. Read pattern, then doubling-copy in place.
+            let mut pattern = [0u8; 32];
+            self.read_at(start, &mut pattern[..distance]);
+
+            // Write initial pattern
+            self.buf[self.tail..self.tail + distance].copy_from_slice(&pattern[..distance]);
+
+            // Doubling copy: copy what we've written so far to fill the rest
+            let mut written = distance;
+            while written < len {
+                let copy_len = written.min(len - written);
+                self.buf
+                    .copy_within(self.tail..self.tail + copy_len, self.tail + written);
+                written += copy_len;
+            }
+            self.tail = (self.tail + len) & self.mask;
             return;
         }
 
@@ -281,7 +389,7 @@ impl RingBuffer {
 
     /// Safe version retained for API compatibility. Despite the name "unchecked",
     /// this is fully safe. Allows start + len > self.len() for repeat/overlap patterns.
-    #[inline]
+    #[inline(always)]
     pub fn extend_from_within_unchecked(&mut self, start: usize, len: usize) {
         debug_assert!(
             start <= self.len(),
@@ -289,6 +397,37 @@ impl RingBuffer {
             self.len()
         );
         self.reserve(len);
+
+        let current_len = self.len();
+        let distance = current_len - start;
+        let cap = self.mask + 1;
+        let src_phys = (self.head + start) & self.mask;
+        let dst_phys = self.tail;
+
+        // Fast path: non-overlapping + both regions contiguous (no ring wrap).
+        // This is the most common case for mixed data with 3-16 byte matches.
+        if distance >= len && src_phys + len <= cap && dst_phys + len <= cap {
+            // Single copy_within avoids temp buffer entirely.
+            // For short copies (most common), LLVM will lower this to
+            // inline register-width loads/stores rather than calling memmove.
+            self.buf.copy_within(src_phys..src_phys + len, dst_phys);
+            self.tail = (self.tail + len) & self.mask;
+            return;
+        }
+
+        // RLE fast path: distance == 1 means single byte repeated.
+        if distance == 1 {
+            let byte = self.buf[src_phys];
+            let mut remaining = len;
+            while remaining > 0 {
+                let contiguous = (cap - self.tail).min(remaining);
+                self.buf[self.tail..self.tail + contiguous].fill(byte);
+                self.tail = (self.tail + contiguous) & self.mask;
+                remaining -= contiguous;
+            }
+            return;
+        }
+
         self.do_extend_from_within(start, len);
     }
 

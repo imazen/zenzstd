@@ -2,27 +2,49 @@ use super::scratch::DecoderScratch;
 use crate::decoding::errors::ExecuteSequencesError;
 
 /// Take the provided decoder and execute the sequences stored within
-#[inline]
+#[inline(always)]
 pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequencesError> {
     let mut literals_copy_counter = 0;
-    let old_buffer_size = scratch.buffer.len();
-    let mut seq_sum = 0;
+    let sequences = &scratch.sequences;
+    let literals_buf = &scratch.literals_buffer;
+    let literals_len = literals_buf.len();
 
-    for idx in 0..scratch.sequences.len() {
-        let seq = scratch.sequences[idx];
+    // Pre-reserve the total output size so per-operation reserve() calls are no-ops.
+    // Total output = sum of all (ll + ml) + any trailing literals.
+    // Single pass to compute total.
+    {
+        let mut total_ll: u64 = 0;
+        let mut total_ml: u64 = 0;
+        for seq in sequences.iter() {
+            total_ll += u64::from(seq.ll);
+            total_ml += u64::from(seq.ml);
+        }
+        let trailing = (literals_len as u64).saturating_sub(total_ll);
+        scratch
+            .buffer
+            .reserve((total_ll + total_ml + trailing) as usize);
+    }
+
+    #[cfg(debug_assertions)]
+    let old_buffer_size = scratch.buffer.len();
+    #[cfg(debug_assertions)]
+    let mut seq_sum: u32 = 0;
+
+    for idx in 0..sequences.len() {
+        let seq = sequences[idx];
 
         if seq.ll > 0 {
             let high = literals_copy_counter + seq.ll as usize;
-            if high > scratch.literals_buffer.len() {
+            if high > literals_len {
                 return Err(ExecuteSequencesError::NotEnoughBytesForSequence {
                     wanted: high,
-                    have: scratch.literals_buffer.len(),
+                    have: literals_len,
                 });
             }
-            let literals = &scratch.literals_buffer[literals_copy_counter..high];
+            let literals = &literals_buf[literals_copy_counter..high];
             literals_copy_counter += seq.ll as usize;
 
-            scratch.buffer.push(literals);
+            scratch.buffer.push_no_reserve(literals);
         }
 
         let actual_offset = do_offset_history(seq.of, seq.ll, &mut scratch.offset_hist);
@@ -32,25 +54,34 @@ pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequ
         if seq.ml > 0 {
             scratch
                 .buffer
-                .repeat(actual_offset as usize, seq.ml as usize)?;
+                .repeat_no_reserve(actual_offset as usize, seq.ml as usize)?;
         }
 
-        seq_sum += seq.ml;
-        seq_sum += seq.ll;
+        #[cfg(debug_assertions)]
+        {
+            seq_sum += seq.ml;
+            seq_sum += seq.ll;
+        }
     }
-    if literals_copy_counter < scratch.literals_buffer.len() {
-        let rest_literals = &scratch.literals_buffer[literals_copy_counter..];
-        scratch.buffer.push(rest_literals);
-        seq_sum += rest_literals.len() as u32;
+    if literals_copy_counter < literals_len {
+        let rest_literals = &literals_buf[literals_copy_counter..];
+        scratch.buffer.push_no_reserve(rest_literals);
+        #[cfg(debug_assertions)]
+        {
+            seq_sum += rest_literals.len() as u32;
+        }
     }
 
-    let diff = scratch.buffer.len() - old_buffer_size;
-    assert!(
-        seq_sum as usize == diff,
-        "Seq_sum: {} is different from the difference in buffersize: {}",
-        seq_sum,
-        diff
-    );
+    #[cfg(debug_assertions)]
+    {
+        let diff = scratch.buffer.len() - old_buffer_size;
+        assert!(
+            seq_sum as usize == diff,
+            "Seq_sum: {} is different from the difference in buffersize: {}",
+            seq_sum,
+            diff
+        );
+    }
     Ok(())
 }
 
@@ -59,53 +90,50 @@ pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequ
 /// before you get a functional number.
 #[inline(always)]
 fn do_offset_history(offset_value: u32, lit_len: u32, scratch: &mut [u32; 3]) -> u32 {
-    let actual_offset = if lit_len > 0 {
-        match offset_value {
-            1..=3 => scratch[offset_value as usize - 1],
-            _ => {
-                //new offset
-                offset_value - 3
-            }
-        }
-    } else {
-        match offset_value {
-            1..=2 => scratch[offset_value as usize],
-            3 => scratch[0] - 1,
-            _ => {
-                //new offset
-                offset_value - 3
-            }
-        }
-    };
+    // Most common case: new offset (offset_value > 3).
+    // Pulled to the top so the branch predictor can fast-path it.
+    if offset_value > 3 {
+        let actual_offset = offset_value - 3;
+        scratch[2] = scratch[1];
+        scratch[1] = scratch[0];
+        scratch[0] = actual_offset;
+        return actual_offset;
+    }
 
-    //update history
+    // Repeat offset: resolve the actual offset value
+    let actual_offset;
     if lit_len > 0 {
+        // ll > 0: offset 1/2/3 map to scratch[0]/[1]/[2]
+        actual_offset = scratch[offset_value as usize - 1];
         match offset_value {
             1 => {
-                //nothing
+                // No history update
             }
             2 => {
                 scratch[1] = scratch[0];
                 scratch[0] = actual_offset;
             }
             _ => {
+                // offset == 3
                 scratch[2] = scratch[1];
                 scratch[1] = scratch[0];
                 scratch[0] = actual_offset;
             }
         }
     } else {
+        // ll == 0: different mapping
+        actual_offset = match offset_value {
+            1 => scratch[1],
+            2 => scratch[2],
+            _ => scratch[0].wrapping_sub(1), // 3
+        };
         match offset_value {
             1 => {
                 scratch[1] = scratch[0];
                 scratch[0] = actual_offset;
             }
-            2 => {
-                scratch[2] = scratch[1];
-                scratch[1] = scratch[0];
-                scratch[0] = actual_offset;
-            }
             _ => {
+                // offset 2 and 3: full rotation
                 scratch[2] = scratch[1];
                 scratch[1] = scratch[0];
                 scratch[0] = actual_offset;

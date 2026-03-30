@@ -121,19 +121,32 @@ fn decode_sequences_with_rle(
         });
 
         if target.len() < section.num_sequences as usize {
-            //println!(
-            //    "Bits left: {} ({} bytes)",
-            //    br.bits_remaining(),
-            //    br.bits_remaining() / 8,
-            //);
+            // Batch non-RLE state updates
+            let ll_nbits = if scratch.ll_rle.is_none() {
+                ll_dec.state_update_params().0
+            } else {
+                0
+            };
+            let ml_nbits = if scratch.ml_rle.is_none() {
+                ml_dec.state_update_params().0
+            } else {
+                0
+            };
+            let of_nbits = if scratch.of_rle.is_none() {
+                of_dec.state_update_params().0
+            } else {
+                0
+            };
+
+            let (ll_add, ml_add_state, of_add) = br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
             if scratch.ll_rle.is_none() {
-                ll_dec.update_state(br);
+                ll_dec.apply_state_update(ll_add);
             }
             if scratch.ml_rle.is_none() {
-                ml_dec.update_state(br);
+                ml_dec.apply_state_update(ml_add_state);
             }
             if scratch.of_rle.is_none() {
-                of_dec.update_state(br);
+                of_dec.apply_state_update(of_add);
             }
         }
 
@@ -165,10 +178,11 @@ fn decode_sequences_without_rle(
     of_dec.init_state(br)?;
     ml_dec.init_state(br)?;
 
+    let num_sequences = section.num_sequences as usize;
     target.clear();
-    target.reserve(section.num_sequences as usize);
+    target.reserve(num_sequences);
 
-    for _seq_idx in 0..section.num_sequences {
+    for seq_idx in 0..num_sequences {
         let ll_code = ll_dec.decode_symbol();
         let ml_code = ml_dec.decode_symbol();
         let of_code = of_dec.decode_symbol();
@@ -195,15 +209,18 @@ fn decode_sequences_without_rle(
             of: offset,
         });
 
-        if target.len() < section.num_sequences as usize {
-            //println!(
-            //    "Bits left: {} ({} bytes)",
-            //    br.bits_remaining(),
-            //    br.bits_remaining() / 8,
-            //);
-            ll_dec.update_state(br);
-            ml_dec.update_state(br);
-            of_dec.update_state(br);
+        if seq_idx + 1 < num_sequences {
+            // Batch the three FSE state updates into a single triple-read
+            // to minimize refill calls. Each update needs state.num_bits
+            // bits from the bitstream.
+            let (ll_nbits, _) = ll_dec.state_update_params();
+            let (ml_nbits, _) = ml_dec.state_update_params();
+            let (of_nbits, _) = of_dec.state_update_params();
+
+            let (ll_add, ml_add_state, of_add) = br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
+            ll_dec.apply_state_update(ll_add);
+            ml_dec.apply_state_update(ml_add_state);
+            of_dec.apply_state_update(of_add);
         }
 
         if br.bits_remaining() < 0 {
