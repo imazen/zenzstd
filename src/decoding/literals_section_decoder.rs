@@ -110,14 +110,26 @@ fn decompress_literals(
             }
             decoder.init_state(&mut br);
 
-            while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
-                target.push(decoder.decode_symbol());
+            let end_threshold = -(scratch.table.max_num_bits as isize);
+            // Decode in batches to reduce Vec growth overhead
+            let mut batch = [0u8; 64];
+            let mut batch_pos = 0;
+            while br.bits_remaining() > end_threshold {
+                batch[batch_pos] = decoder.decode_symbol();
+                batch_pos += 1;
                 decoder.next_state(&mut br);
+                if batch_pos == 64 {
+                    target.extend_from_slice(&batch);
+                    batch_pos = 0;
+                }
             }
-            if br.bits_remaining() != -(scratch.table.max_num_bits as isize) {
+            if batch_pos > 0 {
+                target.extend_from_slice(&batch[..batch_pos]);
+            }
+            if br.bits_remaining() != end_threshold {
                 return Err(DecompressLiteralsError::BitstreamReadMismatch {
                     read_til: br.bits_remaining(),
-                    expected: -(scratch.table.max_num_bits as isize),
+                    expected: end_threshold,
                 });
             }
         }
@@ -141,9 +153,20 @@ fn decompress_literals(
             return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
         }
         decoder.init_state(&mut br);
-        while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
-            target.push(decoder.decode_symbol());
+        let end_threshold = -(scratch.table.max_num_bits as isize);
+        let mut batch = [0u8; 64];
+        let mut batch_pos = 0;
+        while br.bits_remaining() > end_threshold {
+            batch[batch_pos] = decoder.decode_symbol();
+            batch_pos += 1;
             decoder.next_state(&mut br);
+            if batch_pos == 64 {
+                target.extend_from_slice(&batch);
+                batch_pos = 0;
+            }
+        }
+        if batch_pos > 0 {
+            target.extend_from_slice(&batch[..batch_pos]);
         }
         bytes_read += source.len() as u32;
     }

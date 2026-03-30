@@ -22,6 +22,7 @@ impl<'t> HuffmanDecoder<'t> {
 
     /// Decode the symbol the internal state (cursor) is pointed at and return the
     /// decoded literal.
+    #[inline(always)]
     pub fn decode_symbol(&mut self) -> u8 {
         self.table.decode[self.state as usize].symbol
     }
@@ -38,6 +39,7 @@ impl<'t> HuffmanDecoder<'t> {
 
     /// Advance the internal cursor to the next symbol. After this, you can call `decode_symbol`
     /// to read from the new position.
+    #[inline(always)]
     pub fn next_state(&mut self, br: &mut BitReaderReversed<'_>) -> u8 {
         // self.state stores a small section, or a window of the bit stream. The table can be indexed via this state,
         // telling you how many bits identify the current symbol.

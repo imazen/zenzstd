@@ -23,6 +23,7 @@ impl<'t> FSEDecoder<'t> {
     }
 
     /// Returns the byte associated with the symbol the internal cursor is pointing at.
+    #[inline(always)]
     pub fn decode_symbol(&self) -> u8 {
         self.state.symbol
     }
@@ -40,14 +41,13 @@ impl<'t> FSEDecoder<'t> {
     }
 
     /// Advance the internal state to decode the next symbol in the bitstream.
+    #[inline(always)]
     pub fn update_state(&mut self, bits: &mut BitReaderReversed<'_>) {
         let num_bits = self.state.num_bits;
         let add = bits.get_bits(num_bits);
         let base_line = self.state.base_line;
         let new_state = base_line + add as u32;
         self.state = self.table.decode[new_state as usize];
-
-        //println!("Update: {}, {} -> {}", base_line, add,  self.state);
     }
 }
 

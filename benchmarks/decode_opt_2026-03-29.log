@@ -1,0 +1,148 @@
+warning: unused variable: `dict_len`
+    --> src/encoding/zstd_match.rs:3578:5
+     |
+3578 |     dict_len: usize,
+     |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dict_len`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `histogram` is never used
+   --> src/encoding/simd.rs:157:8
+    |
+157 | pub fn histogram(data: &[u8], counts: &mut [u32; 256]) {
+    |        ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `ht_lookup_and_insert` is never used
+   --> src/encoding/zstd_match.rs:554:4
+    |
+554 | fn ht_lookup_and_insert(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `xxhash64` is never used
+  --> src/xxhash64.rs:13:8
+   |
+13 | pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
+   |        ^^^^^^^^
+
+warning: method `reset` is never used
+   --> src/xxhash64.rs:213:12
+    |
+134 | impl XxHash64 {
+    | ------------- method in this implementation
+...
+213 |     pub fn reset(&mut self) {
+    |            ^^^^^
+
+warning: `zenzstd` (lib) generated 5 warnings (run `cargo fix --lib -p zenzstd` to apply 1 suggestion)
+   Compiling zenzstd v0.1.0 (/home/lilith/work/zen/zenzstd)
+warning: unused variable: `zen_compressed`
+   --> benches/compress_compare.rs:112:9
+    |
+112 |     let zen_compressed = zenzstd::encoding::compress_to_vec(
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_zen_compressed`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `zenzstd` (bench "compress_compare") generated 1 warning (run `cargo fix --bench "compress_compare" -p zenzstd` to apply 1 suggestion)
+    Finished `bench` profile [optimized] target(s) in 0.40s
+     Running benches/compress_compare.rs (target/release/deps/compress_compare-423c44fd3b819f40)
+RATIO text_100k    L 1: zen=    131 (763.4x)  c=     64 (1562.5x)  zen/c=2.05
+RATIO text_100k    L 3: zen=     84 (1190.5x)  c=     64 (1562.5x)  zen/c=1.31
+RATIO text_100k    L 7: zen=     84 (1190.5x)  c=     64 (1562.5x)  zen/c=1.31
+RATIO text_100k    L11: zen=     84 (1190.5x)  c=     64 (1562.5x)  zen/c=1.31
+RATIO text_100k    L19: zen=     84 (1190.5x)  c=     64 (1562.5x)  zen/c=1.31
+RATIO text_100k    L22: zen=     84 (1190.5x)  c=     64 (1562.5x)  zen/c=1.31
+RATIO mixed_100k   L 1: zen=  13706 (  7.3x)  c=  13357 (  7.5x)  zen/c=1.03
+RATIO mixed_100k   L 3: zen=  12057 (  8.3x)  c=  12572 (  8.0x)  zen/c=0.96
+RATIO mixed_100k   L 7: zen=   7341 ( 13.6x)  c=   9564 ( 10.5x)  zen/c=0.77
+RATIO mixed_100k   L11: zen=   5204 ( 19.2x)  c=   8047 ( 12.4x)  zen/c=0.65
+RATIO mixed_100k   L19: zen=   4070 ( 24.6x)  c=   3468 ( 28.8x)  zen/c=1.17
+RATIO mixed_100k   L22: zen=   4070 ( 24.6x)  c=   3468 ( 28.8x)  zen/c=1.17
+RATIO random_100k  L 1: zen= 100013 (  1.0x)  c= 100009 (  1.0x)  zen/c=1.00
+RATIO random_100k  L 3: zen= 100013 (  1.0x)  c= 100009 (  1.0x)  zen/c=1.00
+RATIO random_100k  L 7: zen= 100013 (  1.0x)  c= 100009 (  1.0x)  zen/c=1.00
+RATIO random_100k  L11: zen= 100013 (  1.0x)  c= 100009 (  1.0x)  zen/c=1.00
+RATIO random_100k  L19: zen= 100013 (  1.0x)  c= 100009 (  1.0x)  zen/c=1.00
+RATIO random_100k  L22: zen= 100013 (  1.0x)  c= 100009 (  1.0x)  zen/c=1.00
+RATIO text_1m      L 1: zen=    294 (3401.4x)  c=    148 (6756.8x)  zen/c=1.99
+RATIO text_1m      L 3: zen=    247 (4048.6x)  c=    148 (6756.8x)  zen/c=1.67
+RATIO text_1m      L 7: zen=    247 (4048.6x)  c=    148 (6756.8x)  zen/c=1.67
+RATIO text_1m      L11: zen=    247 (4048.6x)  c=    214 (4672.9x)  zen/c=1.15
+RATIO text_1m      L19: zen=    247 (4048.6x)  c=    143 (6993.0x)  zen/c=1.73
+RATIO text_1m      L22: zen=    247 (4048.6x)  c=    143 (6993.0x)  zen/c=1.73
+[zenbench] calibration: int=0.27ns/iter mem_bw=114.9GiB/s mem_lat=9.8ns
+[zenbench] timer resolution: 10ns, loop overhead: 0.19ns/iter, TSC: 4.491 ticks/ns (invariant)
+[zenbench] results → /tmp/zenbench/zenbench-1774848209-95d85.txt
+
+═══════════════════════════════════════════════════════════════
+  zenbench  1774848209-95d85
+  git: 7d9f940ceb328c918aa86814719ee97ea6ab11c6
+═══════════════════════════════════════════════════════════════
+
+  compress_text_100k  76 rounds × 2 calls
+                         mean ±mad µs  95% CI vs base            iB/s
+  ├─ zenzstd_L1        227.4 ±18.1µs  [220.3–236.1]µs           419M
+  ├─ c_zstd_L1           17.6 ±5.7µs  [-94.3%–-90.0%]          5.30G [1]
+  ├─ zenzstd_L3        293.4 ±42.3µs  [+23.5%–+31.3%]           325M [2]
+  ├─ c_zstd_L3           34.2 ±8.7µs  [-87.1%–-82.2%]          2.72G [3]
+  ├─ zenzstd_L7       803.3 ±105.7µs  [+233.2%–+257.6%]         119M
+  ├─ c_zstd_L7         167.2 ±28.9µs  [-33.7%–-26.0%]           570M [4]
+  ├─ zenzstd_L11     2046.2 ±273.8µs  [+768.9%–+831.2%]        46.6M
+  ├─ c_zstd_L11        583.4 ±96.8µs  [+142.7%–+161.2%]         163M
+  ├─ zenzstd_L19     1208.2 ±155.1µs  [+411.7%–+439.1%]        78.9M
+  ╰─ c_zstd_L19    60434.9 ±1273.2µs  [+26275.6%–+26511.8%]    1.58M
+
+  c_zstd_L1    ██████████████████████████████████████████████████████ 5.30 GiB/s
+  c_zstd_L3    ████████████████████████████ 2.72 GiB/s
+  c_zstd_L7    ██████ 570 MiB/s
+  zenzstd_L1   ████ 419 MiB/s
+  zenzstd_L3   ███ 325 MiB/s
+  c_zstd_L11   ██ 163 MiB/s
+  zenzstd_L7   █ 119 MiB/s
+  zenzstd_L19  █ 78.9 MiB/s
+  zenzstd_L11  █ 46.6 MiB/s
+  c_zstd_L19   █ 1.58 MiB/s
+  [1] CV=32%
+  [2] CV=20%
+  [3] CV=27%
+  [4] CV=37%
+
+  compress_mixed_100k  200 rounds × 1 calls
+                       mean ±mad µs  95% CI vs base        iB/s
+  ├─ zenzstd_L1      561.9 ±37.4µs  [551.1–574.2]µs       170M
+  ├─ c_zstd_L1       113.6 ±12.0µs  [-80.2%–-78.4%]       840M [1]
+  ├─ zenzstd_L3      649.0 ±45.8µs  [+14.3%–+17.8%]       147M
+  ├─ c_zstd_L3       144.0 ±15.2µs  [-74.9%–-72.8%]       662M [2]
+  ├─ zenzstd_L7    1671.9 ±120.1µs  [+187.2%–+194.1%]    57.0M
+  ├─ c_zstd_L7       838.2 ±84.7µs  [+45.4%–+49.7%]       114M
+  ├─ zenzstd_L11   3540.2 ±324.1µs  [+511.4%–+527.4%]    26.9M
+  ╰─ c_zstd_L11    1948.0 ±264.6µs  [+241.6%–+252.4%]    49.0M
+
+  c_zstd_L1    ██████████████████████████████████████████████████████ 840 MiB/s
+  c_zstd_L3    ███████████████████████████████████████████ 662 MiB/s
+  zenzstd_L1   ███████████ 170 MiB/s
+  zenzstd_L3   █████████ 147 MiB/s
+  c_zstd_L7    ███████ 114 MiB/s
+  zenzstd_L7   ████ 57.0 MiB/s
+  c_zstd_L11   ███ 49.0 MiB/s
+  zenzstd_L11  ██ 26.9 MiB/s
+  [1] CV=26%
+  [2] CV=24%
+
+  decompress_text_100k  200 rounds × 61 calls
+                      mean ±mad µs  95% CI vs base     iB/s
+  ├─ zenzstd_decode   16.8 ±0.4µs  [16.6–17.0]µs     5.54G
+  ╰─ c_zstd_decode    16.4 ±0.4µs  [-3.3%–-2.2%]     5.66G
+
+  c_zstd_decode   ███████████████████████████████████████████████████ 5.66 GiB/s
+  zenzstd_decode  ██████████████████████████████████████████████████ 5.54 GiB/s
+
+  ratio_report  1 rounds × 1M calls ⚠ only 1 rounds
+            mean ±mad ns  95% CI vs base
+  ╰─ noop   0.19 ±0.00ns  
+
+  total: 49.4s  (473 noisy rounds)
+═══════════════════════════════════════════════════════════════
+  filter: cargo bench -- --group=NAME  format: --format=llm|csv|md|json

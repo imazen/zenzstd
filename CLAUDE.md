@@ -49,7 +49,7 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 | L11 | 0.65 (35% better) |
 
 ### Decompression speed
-zenzstd 1.91 GiB/s vs C 5.64 GiB/s (3x gap)
+zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 
 ## Known Issues
 

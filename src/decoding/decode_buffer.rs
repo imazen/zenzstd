@@ -57,47 +57,27 @@ impl DecodeBuffer {
         self.buffer.len()
     }
 
+    #[inline]
     pub fn push(&mut self, data: &[u8]) {
         self.buffer.extend(data);
         self.total_output_counter += data.len() as u64;
     }
 
+    #[inline]
     pub fn repeat(&mut self, offset: usize, match_length: usize) -> Result<(), DecodeBufferError> {
         if offset > self.buffer.len() {
             self.repeat_from_dict(offset, match_length)
         } else {
             let buf_len = self.buffer.len();
             let start_idx = buf_len - offset;
-            let end_idx = start_idx + match_length;
 
-            self.buffer.reserve(match_length);
-            if end_idx > buf_len {
-                // We need to copy in chunks.
-                self.repeat_in_chunks(offset, match_length, start_idx);
-            } else {
-                // can just copy parts of the existing buffer
-                self.buffer
-                    .extend_from_within_unchecked(start_idx, match_length);
-            }
+            // extend_from_within_unchecked handles both overlapping (offset < match_length)
+            // and non-overlapping cases efficiently, including the RLE special case.
+            self.buffer
+                .extend_from_within_unchecked(start_idx, match_length);
 
             self.total_output_counter += match_length as u64;
             Ok(())
-        }
-    }
-
-    fn repeat_in_chunks(&mut self, offset: usize, match_length: usize, start_idx: usize) {
-        // We have at max offset bytes in one chunk, the last one can be smaller
-        let mut start_idx = start_idx;
-        let mut copied_counter_left = match_length;
-        // TODO this can  be optimized further I think.
-        // Each time we copy a chunk we have a repetiton of length 'offset', so we can copy offset * iteration many bytes from start_idx
-        while copied_counter_left > 0 {
-            let chunksize = usize::min(offset, copied_counter_left);
-
-            self.buffer
-                .extend_from_within_unchecked(start_idx, chunksize);
-            copied_counter_left -= chunksize;
-            start_idx += chunksize;
         }
     }
 

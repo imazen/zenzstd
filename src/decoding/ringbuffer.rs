@@ -28,23 +28,19 @@ impl RingBuffer {
     }
 
     /// Return the number of bytes in the buffer.
-    #[inline]
+    #[inline(always)]
     pub fn len(&self) -> usize {
-        if self.buf.is_empty() {
-            return 0;
-        }
-        let cap = self.mask + 1;
-        self.tail.wrapping_sub(self.head) & (cap - 1)
+        // When buf is empty, mask is 0 and head == tail == 0, so the
+        // expression below still returns 0 — no branch needed.
+        self.tail.wrapping_sub(self.head) & self.mask
     }
 
     /// Return the amount of available space (in bytes) of the buffer.
+    #[inline(always)]
     pub fn free(&self) -> usize {
-        if self.buf.is_empty() {
-            return 0;
-        }
-        let cap = self.mask + 1;
-        // We keep one sentinel slot unused to distinguish full from empty
-        cap - 1 - self.len()
+        // mask == cap - 1, so free = mask - len.
+        // When buf is empty, mask == 0 and len == 0, returns 0.
+        self.mask - self.len()
     }
 
     /// Empty the buffer and reset the head and tail.
@@ -54,6 +50,7 @@ impl RingBuffer {
     }
 
     /// Ensure that there's space for `amount` elements in the buffer.
+    #[inline(always)]
     pub fn reserve(&mut self, amount: usize) {
         if self.free() >= amount {
             return;
@@ -109,6 +106,7 @@ impl RingBuffer {
     }
 
     /// Append the provided data to the end of `self`.
+    #[inline]
     pub fn extend(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
@@ -153,6 +151,7 @@ impl RingBuffer {
 
     /// Copies elements from the provided range to the end of the buffer.
     #[allow(dead_code)]
+    #[inline]
     pub fn extend_from_within(&mut self, start: usize, len: usize) {
         assert!(
             start + len <= self.len(),
@@ -166,17 +165,72 @@ impl RingBuffer {
         self.do_extend_from_within(start, len);
     }
 
+    /// Copy `len` bytes from logical position `start` to the tail of the ring.
+    /// Handles both overlapping (distance < len) and non-overlapping cases
+    /// without heap allocation for copies up to 256 bytes.
     fn do_extend_from_within(&mut self, start: usize, len: usize) {
         let current_len = self.len();
         let distance = current_len - start;
 
         if distance >= len {
-            // No overlap: copy via temp buffer
+            // Non-overlapping: source and destination don't alias.
+            self.copy_within_non_overlapping(start, len);
+        } else {
+            // Overlapping: the source pattern repeats with period `distance`.
+            self.copy_within_repeating(start, distance, len);
+        }
+    }
+
+    /// Copy `len` bytes from logical index `start` to the tail.
+    /// Caller guarantees distance >= len (no overlap).
+    #[inline]
+    fn copy_within_non_overlapping(&mut self, start: usize, len: usize) {
+        if len <= 256 {
+            // Stack-allocated temp buffer for short/medium copies
+            let mut tmp = [0u8; 256];
+            self.read_at(start, &mut tmp[..len]);
+            self.extend_raw(&tmp[..len]);
+        } else {
+            // Large copy: heap allocation unavoidable
             let mut tmp = vec![0u8; len];
             self.read_at(start, &mut tmp);
             self.extend_raw(&tmp);
+        }
+    }
+
+    /// Copy a repeating pattern of `distance` bytes, producing `len` total output bytes.
+    #[inline]
+    fn copy_within_repeating(&mut self, start: usize, distance: usize, len: usize) {
+        if distance == 1 {
+            // RLE: single byte repeated — very common in zstd
+            let src_idx = (self.head + start) & self.mask;
+            let byte = self.buf[src_idx];
+            // Write directly into ring buffer
+            let mut remaining = len;
+            while remaining > 0 {
+                let cap = self.mask + 1;
+                let contiguous = (cap - self.tail).min(remaining);
+                // Fill contiguous region with the repeated byte
+                self.buf[self.tail..self.tail + contiguous].fill(byte);
+                self.tail = (self.tail + contiguous) & self.mask;
+                remaining -= contiguous;
+            }
+            return;
+        }
+
+        if distance <= 256 {
+            // Read the pattern into a stack buffer
+            let mut pattern = [0u8; 256];
+            self.read_at(start, &mut pattern[..distance]);
+
+            let mut remaining = len;
+            while remaining > 0 {
+                let chunk = remaining.min(distance);
+                self.extend_raw(&pattern[..chunk]);
+                remaining -= chunk;
+            }
         } else {
-            // Overlapping: the pattern repeats with given period
+            // Large pattern: heap allocation
             let mut pattern = vec![0u8; distance];
             self.read_at(start, &mut pattern);
 
@@ -190,6 +244,7 @@ impl RingBuffer {
     }
 
     /// Low-level extend that assumes space is already reserved.
+    #[inline]
     fn extend_raw(&mut self, data: &[u8]) {
         if data.is_empty() {
             return;
@@ -208,6 +263,7 @@ impl RingBuffer {
     }
 
     /// Read `dst.len()` bytes starting at logical index `start` into `dst`.
+    #[inline]
     fn read_at(&self, start: usize, dst: &mut [u8]) {
         let cap = self.mask + 1;
         let begin = (self.head + start) & self.mask;
@@ -225,6 +281,7 @@ impl RingBuffer {
 
     /// Safe version retained for API compatibility. Despite the name "unchecked",
     /// this is fully safe. Allows start + len > self.len() for repeat/overlap patterns.
+    #[inline]
     pub fn extend_from_within_unchecked(&mut self, start: usize, len: usize) {
         debug_assert!(
             start <= self.len(),
@@ -237,6 +294,7 @@ impl RingBuffer {
 
     /// Also fully safe. Retained for API compatibility.
     #[allow(dead_code)]
+    #[inline]
     pub fn extend_from_within_unchecked_branchless(&mut self, start: usize, len: usize) {
         self.extend_from_within_unchecked(start, len);
     }
@@ -370,5 +428,77 @@ mod tests {
         assert_eq!(rb.get(0), Some(b'a'));
         assert_eq!(rb.get(1), Some(b'b'));
         assert_eq!(rb.get(2), Some(b'c'));
+    }
+
+    #[test]
+    fn test_rle_repeat() {
+        // distance=1 triggers the RLE fast path
+        let mut rb = RingBuffer::new();
+        rb.extend(b"X");
+        rb.extend_from_within_unchecked(0, 10);
+        assert_eq!(collect(&rb), b"XXXXXXXXXXX");
+    }
+
+    #[test]
+    fn test_short_repeat_pattern() {
+        // distance=2, len=8: pattern "AB" repeated
+        let mut rb = RingBuffer::new();
+        rb.extend(b"AB");
+        rb.extend_from_within_unchecked(0, 8);
+        assert_eq!(collect(&rb), b"ABABABABAB");
+    }
+
+    #[test]
+    fn test_large_non_overlapping_copy() {
+        // Non-overlapping copy > 256 bytes (heap path)
+        let mut rb = RingBuffer::new();
+        let data: alloc::vec::Vec<u8> = (0..=255).cycle().take(512).collect();
+        rb.extend(&data);
+        rb.extend_from_within(0, 512);
+        let result = collect(&rb);
+        assert_eq!(result.len(), 1024);
+        assert_eq!(&result[..512], &data[..]);
+        assert_eq!(&result[512..], &data[..]);
+    }
+
+    #[test]
+    fn test_large_repeating_pattern() {
+        // Large repeating pattern > 256 bytes (heap path)
+        let mut rb = RingBuffer::new();
+        let pattern: alloc::vec::Vec<u8> = (0..=255).cycle().take(300).collect();
+        rb.extend(&pattern);
+        rb.extend_from_within_unchecked(0, 600);
+        let result = collect(&rb);
+        assert_eq!(result.len(), 900);
+        // First 300 are the original, then 300+300 pattern repetitions
+        for i in 0..900 {
+            assert_eq!(result[i], pattern[i % 300], "mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_medium_non_overlapping_copy() {
+        // Non-overlapping copy <= 256 bytes (stack path)
+        let mut rb = RingBuffer::new();
+        let data: alloc::vec::Vec<u8> = (0..200).collect();
+        rb.extend(&data);
+        rb.extend_from_within(0, 200);
+        let result = collect(&rb);
+        assert_eq!(result.len(), 400);
+        assert_eq!(&result[..200], &data[..]);
+        assert_eq!(&result[200..], &data[..]);
+    }
+
+    #[test]
+    fn test_rle_across_wrap() {
+        // RLE that wraps around the ring
+        let mut rb = RingBuffer::new();
+        rb.reserve(8); // cap will be next_power_of_2(8+1) = 16
+        rb.extend(b"1234567890ABCDE"); // 15 bytes, nearly full
+        rb.drop_first_n(14); // head=14, len=1
+        // Now extend_from_within_unchecked with distance=1 (RLE)
+        rb.extend_from_within_unchecked(0, 5);
+        let result = collect(&rb);
+        assert_eq!(result, b"EEEEEE");
     }
 }
