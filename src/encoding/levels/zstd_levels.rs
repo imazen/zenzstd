@@ -99,8 +99,15 @@ pub fn compress_level<M: Matcher>(
 
     // Split the block's sequences into partitions for better per-block
     // entropy tables when the data has varying statistical properties.
-    let partitions =
-        block_splitter::split_sequences(&compressed_block.literals, &compressed_block.sequences);
+    // Skip for L1-L4 where the trial encoding overhead exceeds the benefit.
+    let partitions = if level >= 5 {
+        block_splitter::split_sequences(&compressed_block.literals, &compressed_block.sequences)
+    } else {
+        alloc::vec![block_splitter::BlockPartition {
+            literals: compressed_block.literals.clone(),
+            sequences: compressed_block.sequences.clone(),
+        }]
+    };
 
     if partitions.len() <= 1 {
         // No splitting: encode as a single block (common case for small/uniform data)
