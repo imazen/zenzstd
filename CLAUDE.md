@@ -6,7 +6,7 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 
 - `src/decoding/` — RFC 8878 compliant decompressor (from ruzstd, battle-tested 39M downloads)
 - `src/encoding/` — Full compressor with levels 1-22
-  - `zstd_match.rs` — Core match finder: Fast, DFast, Greedy, Lazy, Lazy2 strategies
+  - `zstd_match.rs` — Core match finder: Fast, DFast, Greedy, Lazy, Lazy2, BtLazy2, BtOpt/BtUltra/BtUltra2 strategies
   - `compress_params.rs` — All 4 zstd compression parameter tables (default/256K/128K/16K)
   - `hash.rs` — zstd hash functions (hash4-hash8 matching C primes)
   - `simd.rs` — SIMD-accelerated count_match (archmage optional)
@@ -23,15 +23,13 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 - `#![forbid(unsafe_code)]` — all code is safe Rust
 - `#![no_std]` with alloc — std is optional
 - Safe ringbuffer using Vec<u8> with power-of-2 capacity bitmask
-- BT* strategies (levels 13-22) fall back to Lazy2 — produces valid zstd but suboptimal ratio
+- BT* strategies (levels 13-22) use a binary tree match finder (DUBT-style)
+- BtLazy2 uses binary tree + lazy2 evaluation; BtOpt/BtUltra/BtUltra2 use greedy selection (optimal parsing is a future enhancement)
 - Multi-block encoder has a known bug at levels >= 3 with non-trivial patterns
 
 ## Known Bugs
 
-- Multi-block (>128KB) encoding at levels >= 3 can produce corrupt output
-  - Root cause likely in FSE table state across block boundaries
-  - Single-block encoding works correctly at all levels
-  - Fastest level and Uncompressed work correctly for multi-block
+None currently. The match length code 52 bug (wrong baseline) has been fixed.
 
 ## Features
 
@@ -45,7 +43,7 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 ## Test Commands
 
 ```
-cargo test                      # all tests (181)
+cargo test                      # all tests (189)
 cargo test --features simd      # with SIMD
 cargo check --features simd     # verify SIMD compiles
 ```

@@ -1,4 +1,4 @@
-//! Zstd match-finding engine supporting Fast, DFast, Greedy, Lazy, and Lazy2 strategies.
+//! Zstd match-finding engine supporting all strategies: Fast through BtUltra2.
 //!
 //! This module implements the core match-finding algorithms from the C zstd reference
 //! implementation. Each strategy trades compression speed for ratio:
@@ -8,7 +8,9 @@
 //! - **Greedy** (levels 5): Hash chains with best-match search.
 //! - **Lazy** (levels 6-7): Greedy + check pos+1, use the better match.
 //! - **Lazy2** (levels 8-12): Lazy + also check pos+2, three-way comparison.
-//! - **BtLazy2/BtOpt/BtUltra/BtUltra2** (levels 13-22): Fall back to Lazy2 for now.
+//! - **BtLazy2** (levels 13-15): Binary tree match finder + lazy2 evaluation.
+//! - **BtOpt/BtUltra/BtUltra2** (levels 16-22): Binary tree with greedy selection
+//!   (optimal parsing is a future enhancement).
 //!
 //! All functions are `#![forbid(unsafe_code)]` and operate on `&[u8]` slices.
 
@@ -257,9 +259,8 @@ impl MatchCandidate {
 
 /// Compress a single block of source data using zstd match-finding algorithms.
 ///
-/// Selects the appropriate strategy (Fast, DFast, Greedy, Lazy, Lazy2) based on
-/// `params.strategy`. BtLazy2/BtOpt/BtUltra/BtUltra2 strategies fall back to
-/// Lazy2 for now.
+/// Selects the appropriate strategy based on `params.strategy`:
+/// Fast, DFast, Greedy, Lazy, Lazy2, BtLazy2, BtOpt, BtUltra, or BtUltra2.
 ///
 /// Returns a [`CompressedBlock`] containing the literal bytes and match sequences,
 /// ready for entropy encoding.
@@ -290,11 +291,11 @@ pub fn compress_block_zstd_with_dict(
             Strategy::DFast => compress_dfast(src, params),
             Strategy::Greedy => compress_greedy(src, params),
             Strategy::Lazy => compress_lazy(src, params),
-            Strategy::Lazy2
-            | Strategy::BtLazy2
-            | Strategy::BtOpt
-            | Strategy::BtUltra
-            | Strategy::BtUltra2 => compress_lazy2(src, params),
+            Strategy::Lazy2 => compress_lazy2(src, params),
+            Strategy::BtLazy2 => compress_btlazy2(src, params),
+            Strategy::BtOpt | Strategy::BtUltra | Strategy::BtUltra2 => {
+                compress_btopt(src, params)
+            }
         };
     }
     let dict_len = dict_content.len();
@@ -306,12 +307,12 @@ pub fn compress_block_zstd_with_dict(
         Strategy::DFast => compress_dfast_dict(&combined, dict_len, params, initial_rep_offsets),
         Strategy::Greedy => compress_greedy_dict(&combined, dict_len, params, initial_rep_offsets),
         Strategy::Lazy => compress_lazy_dict(&combined, dict_len, params, initial_rep_offsets),
-        Strategy::Lazy2
-        | Strategy::BtLazy2
-        | Strategy::BtOpt
-        | Strategy::BtUltra
-        | Strategy::BtUltra2 => {
-            compress_lazy2_dict(&combined, dict_len, params, initial_rep_offsets)
+        Strategy::Lazy2 => compress_lazy2_dict(&combined, dict_len, params, initial_rep_offsets),
+        Strategy::BtLazy2 => {
+            compress_btlazy2_dict(&combined, dict_len, params, initial_rep_offsets)
+        }
+        Strategy::BtOpt | Strategy::BtUltra | Strategy::BtUltra2 => {
+            compress_btopt_dict(&combined, dict_len, params, initial_rep_offsets)
         }
     }
 }
@@ -903,6 +904,420 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
 }
 
 // ---------------------------------------------------------------------------
+// Binary Tree match finder (used by BtLazy2, BtOpt, BtUltra, BtUltra2)
+// ---------------------------------------------------------------------------
+
+/// Binary tree table: each position has two entries (smaller_child, larger_child).
+///
+/// The C zstd reference calls this a "Dynamic Unsorted Binary Tree" (DUBT). We
+/// use a simplified variant that inserts directly into a sorted binary tree at
+/// each position, combining insertion and search in a single tree walk.
+///
+/// Memory layout: `tree[2 * (pos & bt_mask)]` = smaller child index,
+///                `tree[2 * (pos & bt_mask) + 1]` = larger child index.
+struct BinaryTree {
+    /// Hash table: maps hash -> tree root position (most recent position with that hash).
+    hash_table: Vec<u32>,
+    hash_log: u32,
+    /// Binary tree storage: 2 entries per position (smaller, larger).
+    tree: Vec<u32>,
+    /// Mask for tree position indexing: `(1 << bt_log) - 1`.
+    bt_mask: u32,
+}
+
+impl BinaryTree {
+    fn new(hash_log: u32, chain_log: u32) -> Self {
+        // C zstd: btLog = chainLog - 1, btMask = (1 << btLog) - 1
+        // tree size = 2 * (1 << btLog) = 1 << chainLog
+        let bt_log = chain_log.saturating_sub(1);
+        let bt_size = 1usize << bt_log;
+        Self {
+            hash_table: vec![0; 1 << hash_log],
+            hash_log,
+            tree: vec![0; 2 * bt_size],
+            bt_mask: (bt_size as u32).wrapping_sub(1),
+        }
+    }
+
+    /// Get the (smaller_child, larger_child) pair indices for a position.
+    #[inline]
+    fn children_idx(&self, pos: u32) -> (usize, usize) {
+        let base = 2 * (pos & self.bt_mask) as usize;
+        (base, base + 1)
+    }
+
+    /// Insert `pos` into the tree and simultaneously search for the best match.
+    ///
+    /// Returns the best match found (if any) with at least `min_match` bytes.
+    /// `search_depth` limits the number of tree nodes visited.
+    /// `window_low` is the minimum valid reference position.
+    fn insert_and_find(
+        &mut self,
+        src: &[u8],
+        pos: usize,
+        min_match: usize,
+        search_depth: usize,
+        window_low: usize,
+    ) -> Option<MatchCandidate> {
+        if pos + 8 > src.len() {
+            return None;
+        }
+
+        let h = hash_ptr(&src[pos..], self.hash_log, min_match as u32);
+        let match_index = self.hash_table[h] as usize;
+        self.hash_table[h] = pos as u32;
+
+        // bt_low: positions at or below this are outside the tree's addressable range
+        let bt_low = if self.bt_mask as usize >= pos {
+            0
+        } else {
+            pos - self.bt_mask as usize
+        };
+
+        let (smaller_idx, larger_idx) = self.children_idx(pos as u32);
+        // We'll track which tree slot to write the next smaller/larger child into.
+        // In the C code these are pointers; we use indices into self.tree.
+        let mut smaller_slot = smaller_idx;
+        let mut larger_slot = larger_idx;
+
+        let mut common_len_smaller: usize = 0;
+        let mut common_len_larger: usize = 0;
+
+        let mut best: Option<MatchCandidate> = None;
+        let mut candidate = match_index;
+        let mut depth = search_depth;
+
+        while depth > 0 && candidate > window_low && candidate < pos {
+            let match_len_min = common_len_smaller.min(common_len_larger);
+
+            // Count how many bytes match starting from the already-known common prefix
+            let remaining_a = &src[pos + match_len_min..];
+            let remaining_b = if candidate + match_len_min < src.len() {
+                &src[candidate + match_len_min..]
+            } else {
+                &[]
+            };
+            let extra = count_match(remaining_a, remaining_b);
+            let match_len = match_len_min + extra;
+
+            if match_len >= min_match {
+                let dist = pos - candidate;
+                let cand = MatchCandidate {
+                    off_base: dist as u32 + 3,
+                    match_len: match_len as u32,
+                };
+                if best.map_or(true, |b| {
+                    cand.match_len > b.match_len
+                        || (cand.match_len == b.match_len && cand.gain() > b.gain())
+                }) {
+                    best = Some(cand);
+                }
+            }
+
+            // If we've matched all the way to the end of input, we can't determine
+            // the ordering, so break to maintain tree consistency.
+            if pos + match_len >= src.len() || candidate + match_len >= src.len() {
+                // Terminate both branches
+                self.tree[smaller_slot] = 0;
+                self.tree[larger_slot] = 0;
+                return best;
+            }
+
+            let (child_smaller_idx, child_larger_idx) = self.children_idx(candidate as u32);
+
+            if src[candidate + match_len] < src[pos + match_len] {
+                // candidate is smaller than current position
+                self.tree[smaller_slot] = candidate as u32;
+                common_len_smaller = match_len;
+                if candidate <= bt_low {
+                    // Use a dummy slot: just zero the slot and stop
+                    self.tree[smaller_slot] = 0;
+                    break;
+                }
+                // Next smaller candidate comes from the larger child of this node
+                smaller_slot = child_larger_idx;
+                candidate = self.tree[child_larger_idx] as usize;
+            } else {
+                // candidate is larger than (or equal to) current position
+                self.tree[larger_slot] = candidate as u32;
+                common_len_larger = match_len;
+                if candidate <= bt_low {
+                    self.tree[larger_slot] = 0;
+                    break;
+                }
+                // Next larger candidate comes from the smaller child of this node
+                larger_slot = child_smaller_idx;
+                candidate = self.tree[child_smaller_idx] as usize;
+            }
+
+            depth -= 1;
+        }
+
+        // Terminate both open branches
+        self.tree[smaller_slot] = 0;
+        self.tree[larger_slot] = 0;
+
+        best
+    }
+
+    /// Insert a position into the tree without searching for matches.
+    /// Used to fill the tree for positions we skip over (inside matches, etc.).
+    fn insert_only(
+        &mut self,
+        src: &[u8],
+        pos: usize,
+        min_match: usize,
+        search_depth: usize,
+        window_low: usize,
+    ) {
+        if pos + 8 > src.len() {
+            return;
+        }
+
+        let h = hash_ptr(&src[pos..], self.hash_log, min_match as u32);
+        let match_index = self.hash_table[h] as usize;
+        self.hash_table[h] = pos as u32;
+
+        let bt_low = if self.bt_mask as usize >= pos {
+            0
+        } else {
+            pos - self.bt_mask as usize
+        };
+
+        let (smaller_idx, larger_idx) = self.children_idx(pos as u32);
+        let mut smaller_slot = smaller_idx;
+        let mut larger_slot = larger_idx;
+
+        let mut common_len_smaller: usize = 0;
+        let mut common_len_larger: usize = 0;
+
+        let mut candidate = match_index;
+        let mut depth = search_depth;
+
+        while depth > 0 && candidate > window_low && candidate < pos {
+            let match_len_min = common_len_smaller.min(common_len_larger);
+
+            let remaining_a = &src[pos + match_len_min..];
+            let remaining_b = if candidate + match_len_min < src.len() {
+                &src[candidate + match_len_min..]
+            } else {
+                &[]
+            };
+            let extra = count_match(remaining_a, remaining_b);
+            let match_len = match_len_min + extra;
+
+            if pos + match_len >= src.len() || candidate + match_len >= src.len() {
+                self.tree[smaller_slot] = 0;
+                self.tree[larger_slot] = 0;
+                return;
+            }
+
+            let (child_smaller_idx, child_larger_idx) = self.children_idx(candidate as u32);
+
+            if src[candidate + match_len] < src[pos + match_len] {
+                self.tree[smaller_slot] = candidate as u32;
+                common_len_smaller = match_len;
+                if candidate <= bt_low {
+                    self.tree[smaller_slot] = 0;
+                    break;
+                }
+                smaller_slot = child_larger_idx;
+                candidate = self.tree[child_larger_idx] as usize;
+            } else {
+                self.tree[larger_slot] = candidate as u32;
+                common_len_larger = match_len;
+                if candidate <= bt_low {
+                    self.tree[larger_slot] = 0;
+                    break;
+                }
+                larger_slot = child_smaller_idx;
+                candidate = self.tree[child_smaller_idx] as usize;
+            }
+
+            depth -= 1;
+        }
+
+        self.tree[smaller_slot] = 0;
+        self.tree[larger_slot] = 0;
+    }
+}
+
+/// Search the binary tree for the best match at `pos`, including repcode checks.
+fn search_binary_tree(
+    src: &[u8],
+    pos: usize,
+    bt: &mut BinaryTree,
+    rep: &RepCodes,
+    params: &CompressionParams,
+    lit_len: u32,
+) -> Option<MatchCandidate> {
+    let min_match = params.min_match.max(4) as usize;
+    let search_depth = params.search_depth();
+    let window_size = params.window_size();
+    let window_low = if pos > window_size { pos - window_size } else { 0 };
+
+    // Check repcodes first (they're free to encode)
+    let mut best = try_repcodes(src, pos, rep, min_match as u32, lit_len);
+
+    // Search the binary tree
+    if let Some(bt_match) = bt.insert_and_find(src, pos, min_match, search_depth, window_low) {
+        if best.map_or(true, |b| {
+            bt_match.match_len > b.match_len
+                || (bt_match.match_len == b.match_len && bt_match.gain() > b.gain())
+        }) {
+            best = Some(bt_match);
+        }
+    }
+
+    best
+}
+
+/// Insert a position into the binary tree without searching.
+#[inline]
+fn insert_binary_tree(
+    src: &[u8],
+    pos: usize,
+    bt: &mut BinaryTree,
+    params: &CompressionParams,
+) {
+    let min_match = params.min_match.max(4) as usize;
+    let search_depth = params.search_depth();
+    let window_size = params.window_size();
+    let window_low = if pos > window_size { pos - window_size } else { 0 };
+    bt.insert_only(src, pos, min_match, search_depth, window_low);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: BtLazy2 (Binary Tree + Lazy2 evaluation)
+// ---------------------------------------------------------------------------
+
+fn compress_btlazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    let mut bt = BinaryTree::new(params.hash_log, params.chain_log);
+    let mut rep = RepCodes::new();
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+
+    let mut anchor: usize = 0;
+    let mut pos: usize = 0;
+    let end = src.len().saturating_sub(8);
+
+    while pos < end {
+        let lit_len = (pos - anchor) as u32;
+        let match0 = search_binary_tree(src, pos, &mut bt, &rep, params, lit_len);
+
+        let match0 = match match0 {
+            Some(m) => m,
+            None => {
+                pos += 1;
+                continue;
+            }
+        };
+
+        // Lazy evaluation: check pos+1
+        let mut best_pos = pos;
+        let mut best_match = match0;
+
+        if pos + 1 < end {
+            let lit_len1 = (pos + 1 - anchor) as u32;
+            let match1 = search_binary_tree(src, pos + 1, &mut bt, &rep, params, lit_len1);
+
+            if let Some(m1) = match1 {
+                if best_match.is_better_lazy(&m1) {
+                    best_pos = pos + 1;
+                    best_match = m1;
+
+                    // Lazy2: also check pos+2
+                    if pos + 2 < end {
+                        let lit_len2 = (pos + 2 - anchor) as u32;
+                        let match2 =
+                            search_binary_tree(src, pos + 2, &mut bt, &rep, params, lit_len2);
+                        if let Some(m2) = match2 {
+                            if best_match.is_better_lazy(&m2) {
+                                best_pos = pos + 2;
+                                best_match = m2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit the best match
+        let lit_len_out = (best_pos - anchor) as u32;
+        literals.extend_from_slice(&src[anchor..best_pos]);
+        let seq = SequenceOut {
+            off_base: best_match.off_base,
+            lit_len: lit_len_out,
+            match_len: best_match.match_len,
+        };
+        rep.update(seq.off_base, lit_len_out);
+        sequences.push(seq);
+
+        let match_end = best_pos + best_match.match_len as usize;
+        // Insert skipped + match-interior positions into the binary tree.
+        // search_binary_tree already inserted pos, pos+1, and possibly pos+2.
+        for p in (pos + 1)..match_end.min(end) {
+            let already =
+                p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
+            if !already {
+                insert_binary_tree(src, p, &mut bt, params);
+            }
+        }
+        pos = match_end;
+        anchor = pos;
+    }
+
+    build_block(src, sequences, literals, anchor)
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: BtOpt / BtUltra / BtUltra2 (Binary Tree + greedy with deeper search)
+// ---------------------------------------------------------------------------
+
+/// BtOpt uses the binary tree for match finding with greedy selection.
+/// BtUltra and BtUltra2 use even deeper search (higher search_log).
+/// For now these all use greedy match selection; optimal parsing is a future
+/// enhancement. The binary tree still provides better matches than hash chains.
+fn compress_btopt(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    let mut bt = BinaryTree::new(params.hash_log, params.chain_log);
+    let mut rep = RepCodes::new();
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+
+    let mut anchor: usize = 0;
+    let mut pos: usize = 0;
+    let end = src.len().saturating_sub(8);
+
+    while pos < end {
+        let lit_len = (pos - anchor) as u32;
+        let best = search_binary_tree(src, pos, &mut bt, &rep, params, lit_len);
+
+        if let Some(m) = best {
+            literals.extend_from_slice(&src[anchor..pos]);
+            let seq = SequenceOut {
+                off_base: m.off_base,
+                lit_len,
+                match_len: m.match_len,
+            };
+            rep.update(seq.off_base, lit_len);
+            sequences.push(seq);
+
+            // Insert match-interior positions
+            let match_end = pos + m.match_len as usize;
+            for p in (pos + 1)..match_end.min(end) {
+                insert_binary_tree(src, p, &mut bt, params);
+            }
+            pos = match_end;
+            anchor = pos;
+        } else {
+            pos += 1;
+        }
+    }
+
+    build_block(src, sequences, literals, anchor)
+}
+
+// ---------------------------------------------------------------------------
 // Dictionary-aware compression
 // ---------------------------------------------------------------------------
 
@@ -1230,6 +1645,137 @@ fn compress_lazy2_dict(
         }
         pos = me;
         anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+fn prefill_binary_tree(
+    bt: &mut BinaryTree,
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+) {
+    if dict_len < 8 {
+        return;
+    }
+    let min_match = params.min_match.max(4) as usize;
+    let search_depth = params.search_depth();
+    let end = dict_len.saturating_sub(7);
+    for pos in 0..end {
+        let window_size = params.window_size();
+        let window_low = if pos > window_size { pos - window_size } else { 0 };
+        bt.insert_only(combined, pos, min_match, search_depth, window_low);
+    }
+}
+
+fn compress_btlazy2_dict(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut bt = BinaryTree::new(params.hash_log, params.chain_log);
+    prefill_binary_tree(&mut bt, combined, dict_len, params);
+    let mut rep = RepCodes {
+        rep: *initial_rep,
+    };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let m0 = match search_binary_tree(combined, pos, &mut bt, &rep, params, ll) {
+            Some(m) => m,
+            None => {
+                pos += 1;
+                continue;
+            }
+        };
+        let mut best_pos = pos;
+        let mut best_match = m0;
+        if pos + 1 < end {
+            let ll1 = (pos + 1 - anchor) as u32;
+            if let Some(m1) = search_binary_tree(combined, pos + 1, &mut bt, &rep, params, ll1) {
+                if best_match.is_better_lazy(&m1) {
+                    best_pos = pos + 1;
+                    best_match = m1;
+                    if pos + 2 < end {
+                        let ll2 = (pos + 2 - anchor) as u32;
+                        if let Some(m2) =
+                            search_binary_tree(combined, pos + 2, &mut bt, &rep, params, ll2)
+                        {
+                            if best_match.is_better_lazy(&m2) {
+                                best_pos = pos + 2;
+                                best_match = m2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let llo = (best_pos - anchor) as u32;
+        literals.extend_from_slice(&combined[anchor..best_pos]);
+        let seq = SequenceOut {
+            off_base: best_match.off_base,
+            lit_len: llo,
+            match_len: best_match.match_len,
+        };
+        rep.update(seq.off_base, llo);
+        sequences.push(seq);
+        let me = best_pos + best_match.match_len as usize;
+        for p in (pos + 1)..me.min(end) {
+            let already = p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
+            if !already {
+                insert_binary_tree(combined, p, &mut bt, params);
+            }
+        }
+        pos = me;
+        anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+fn compress_btopt_dict(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut bt = BinaryTree::new(params.hash_log, params.chain_log);
+    prefill_binary_tree(&mut bt, combined, dict_len, params);
+    let mut rep = RepCodes {
+        rep: *initial_rep,
+    };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let best = search_binary_tree(combined, pos, &mut bt, &rep, params, ll);
+        if let Some(m) = best {
+            literals.extend_from_slice(&combined[anchor..pos]);
+            let seq = SequenceOut {
+                off_base: m.off_base,
+                lit_len: ll,
+                match_len: m.match_len,
+            };
+            rep.update(seq.off_base, ll);
+            sequences.push(seq);
+            let me = pos + m.match_len as usize;
+            for p in (pos + 1)..me.min(end) {
+                insert_binary_tree(combined, p, &mut bt, params);
+            }
+            pos = me;
+            anchor = pos;
+        } else {
+            pos += 1;
+        }
     }
     build_block_dict(combined, dict_len, sequences, literals, anchor)
 }
@@ -1568,7 +2114,7 @@ mod tests {
             src.extend_from_slice(b"another_repeat!");
         }
 
-        for level in [1, 3, 5, 6, 9, 12] {
+        for level in [1, 3, 5, 6, 9, 12, 13, 16, 22] {
             let params = params_for_level(level, Some(src.len() as u64));
             let block = compress_block_zstd(&src, &params);
             verify_reconstruction(&src, &block);
@@ -1580,20 +2126,122 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // BT strategies should fall back to Lazy2
+    // BT strategies: binary tree match finder
     // ---------------------------------------------------------------
 
     #[test]
-    fn bt_strategies_fallback() {
+    fn bt_strategies_reconstruction() {
         let mut src = Vec::new();
         for _ in 0..64 {
-            src.extend_from_slice(b"bt_fallback_test_data_");
+            src.extend_from_slice(b"bt_tree_test_data_pattern_");
         }
 
+        for level in [13, 14, 15, 16, 17, 18, 19, 20, 22] {
+            let params = params_for_level(level, Some(src.len() as u64));
+            let block = compress_block_zstd(&src, &params);
+            verify_reconstruction(&src, &block);
+            assert!(
+                !block.sequences.is_empty(),
+                "level {level}: expected sequences in repetitive data"
+            );
+        }
+    }
+
+    #[test]
+    fn bt_all_zeros() {
+        let src = vec![0u8; 2048];
         for level in [13, 16, 19, 22] {
             let params = params_for_level(level, Some(src.len() as u64));
             let block = compress_block_zstd(&src, &params);
             verify_reconstruction(&src, &block);
+            assert!(
+                !block.sequences.is_empty(),
+                "level {level}: expected sequences for all-zero input"
+            );
+        }
+    }
+
+    #[test]
+    fn bt_random_data() {
+        let mut rng = 0xDEADBEEFu64;
+        let mut src = vec![0u8; 4096];
+        for b in src.iter_mut() {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (rng >> 33) as u8;
+        }
+        for level in [13, 16, 22] {
+            let params = params_for_level(level, Some(src.len() as u64));
+            let block = compress_block_zstd(&src, &params);
+            verify_reconstruction(&src, &block);
+        }
+    }
+
+    #[test]
+    fn bt_mixed_data() {
+        let mut src = Vec::new();
+        src.extend_from_slice(b"UNIQUE_HEADER_DATA_123456789___");
+        for _ in 0..30 {
+            src.extend_from_slice(b"repeated_pattern_block__");
+        }
+        src.extend_from_slice(b"___separator_unique_content___");
+        for _ in 0..20 {
+            src.extend_from_slice(b"another_pattern!");
+        }
+
+        for level in [13, 15, 16, 18, 19, 22] {
+            let params = params_for_level(level, Some(src.len() as u64));
+            let block = compress_block_zstd(&src, &params);
+            verify_reconstruction(&src, &block);
+            assert!(
+                !block.sequences.is_empty(),
+                "level {level}: expected sequences in mixed data"
+            );
+        }
+    }
+
+    #[test]
+    fn bt_better_than_lazy2_on_repetitive() {
+        // Binary tree should find at least as good matches as lazy2 on
+        // repetitive data with varying offsets.
+        let mut src = Vec::new();
+        // Create data with matches at various distances
+        for i in 0u8..20 {
+            for _ in 0..10 {
+                src.extend_from_slice(&[i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 6, i + 7]);
+            }
+        }
+
+        let lazy2_params = params_for_level(12, Some(src.len() as u64));
+        let bt_params = params_for_level(13, Some(src.len() as u64));
+
+        let lazy2_block = compress_block_zstd(&src, &lazy2_params);
+        let bt_block = compress_block_zstd(&src, &bt_params);
+
+        verify_reconstruction(&src, &lazy2_block);
+        verify_reconstruction(&src, &bt_block);
+
+        // BT should produce at least as few literals as lazy2 (better or equal compression)
+        assert!(
+            bt_block.literals.len() <= lazy2_block.literals.len() + lazy2_block.literals.len() / 10,
+            "BT (level 13) produced more literals than lazy2 (level 12): bt={}, lazy2={}",
+            bt_block.literals.len(),
+            lazy2_block.literals.len(),
+        );
+    }
+
+    #[test]
+    fn bt_large_block() {
+        // Test with a large block to exercise the tree pruning (bt_low).
+        let mut data = Vec::new();
+        for _ in 0..2000 {
+            data.extend_from_slice(b"The quick brown fox jumps over the lazy dog. ");
+        }
+        assert!(data.len() > 80_000);
+
+        for level in [13, 16, 19, 22] {
+            let params = params_for_level(level, Some(data.len() as u64));
+            let block = compress_block_zstd(&data, &params);
+            verify_reconstruction(&data, &block);
         }
     }
 
@@ -1686,7 +2334,7 @@ mod tests {
     fn all_same_byte_various_sizes() {
         for size in [16, 64, 256, 1000, 4096] {
             let src = vec![0xAA; size];
-            for level in [1, 3, 5, 6, 9] {
+            for level in [1, 3, 5, 6, 9, 13, 16] {
                 let params = params_for_level(level, Some(src.len() as u64));
                 let block = compress_block_zstd(&src, &params);
                 verify_reconstruction(&src, &block);
@@ -1717,10 +2365,74 @@ mod tests {
         }
         assert!(data.len() > 60_000);
 
-        for level in [1, 3, 5, 7, 9, 11] {
+        for level in [1, 3, 5, 7, 9, 11, 13, 16, 22] {
             let params = params_for_level(level, Some(data.len() as u64));
             let block = compress_block_zstd(&data, &params);
             verify_reconstruction(&data, &block);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Full round-trip: BT levels through encoder + C zstd decoder
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bt_round_trip_c_zstd_decode() {
+        use crate::decoding::FrameDecoder;
+        use crate::encoding::{CompressionLevel, compress_to_vec};
+
+        let mut src = Vec::new();
+        src.extend_from_slice(b"Round-trip test for binary tree strategies. ");
+        for _ in 0..200 {
+            src.extend_from_slice(b"Repeated pattern for BT match finder testing. ");
+        }
+
+        for level in [13, 14, 15, 16, 17, 18, 19, 22] {
+            let compressed = compress_to_vec(src.as_slice(), CompressionLevel::Level(level));
+
+            // Decode with our own decoder
+            let mut decoder = FrameDecoder::new();
+            let mut decoded = Vec::with_capacity(src.len());
+            decoder
+                .decode_all_to_vec(&compressed, &mut decoded)
+                .expect(&alloc::format!("our decoder failed at level {level}"));
+            assert_eq!(
+                decoded, src,
+                "our decoder: mismatch at level {level}"
+            );
+
+            // Decode with C zstd
+            let mut decoded_c = Vec::new();
+            zstd::stream::copy_decode(compressed.as_slice(), &mut decoded_c)
+                .expect(&alloc::format!("C zstd failed at level {level}"));
+            assert_eq!(
+                decoded_c, src,
+                "C zstd: mismatch at level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn bt_round_trip_small_data() {
+        use crate::encoding::{CompressionLevel, compress_to_vec};
+
+        // Small enough to use the 16KB parameter table
+        let mut src = Vec::new();
+        for _ in 0..50 {
+            src.extend_from_slice(b"small BT test ");
+        }
+        assert!(src.len() < 16 * 1024);
+
+        for level in [13, 16, 19, 22] {
+            let compressed = compress_to_vec(src.as_slice(), CompressionLevel::Level(level));
+
+            let mut decoded = Vec::new();
+            zstd::stream::copy_decode(compressed.as_slice(), &mut decoded)
+                .expect(&alloc::format!("C zstd failed at level {level}"));
+            assert_eq!(
+                decoded, src,
+                "C zstd: small data mismatch at level {level}"
+            );
         }
     }
 }

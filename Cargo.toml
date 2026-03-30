@@ -17,6 +17,9 @@ dict_builder = ["std", "dep:fastrand"]
 fuzz_exports = []
 simd = ["dep:archmage", "dep:magetypes"]
 
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("avx512"))'] }
+
 [dependencies]
 fastrand = { version = "2.3.0", optional = true }
 archmage = { path = "/home/lilith/work/archmage", optional = true }
