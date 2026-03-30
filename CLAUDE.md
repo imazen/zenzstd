@@ -43,7 +43,7 @@ None currently. The match length code 52 bug (wrong baseline) has been fixed.
 ## Test Commands
 
 ```
-cargo test                      # all tests (189)
+cargo test                      # all tests (199)
 cargo test --features simd      # with SIMD
 cargo check --features simd     # verify SIMD compiles
 ```
