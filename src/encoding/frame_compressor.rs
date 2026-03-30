@@ -185,15 +185,28 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                         block_type: crate::blocks::block::BlockType::Raw,
                         block_size: read_bytes.try_into().unwrap(),
                     };
-                    // Write the header, then the block
                     header.serialize(output);
                     output.extend_from_slice(&uncompressed_data);
                 }
                 CompressionLevel::Fastest => {
                     compress_fastest(&mut self.state, last_block, uncompressed_data, output)
                 }
-                _ => {
-                    unimplemented!();
+                CompressionLevel::Default
+                | CompressionLevel::Better
+                | CompressionLevel::Best
+                | CompressionLevel::Level(_) => {
+                    let level = self.compression_level.to_level();
+                    super::levels::zstd_levels::compress_level(
+                        &mut self.state,
+                        last_block,
+                        &uncompressed_data,
+                        level,
+                        None,
+                        output,
+                    );
+                    // Still need to feed the matcher for window management
+                    self.state.matcher.commit_space(uncompressed_data);
+                    self.state.matcher.skip_matching();
                 }
             }
             drain.write_all(output).unwrap();

@@ -304,6 +304,92 @@ fn encode_offset(len: u32) -> (u8, u32, usize) {
     (log as u8, lower, log as usize)
 }
 
+/// Encode a compressed block from pre-computed sequences and literals.
+///
+/// This is the entry point for the new zstd_match-based compression pipeline.
+/// It takes the output of `compress_block_zstd` and encodes it into the zstd
+/// compressed block format.
+pub fn encode_compressed_block<M: crate::encoding::Matcher>(
+    literals_vec: &[u8],
+    sequences_out: &[crate::encoding::zstd_match::SequenceOut],
+    state: &mut crate::encoding::frame_compressor::CompressState<M>,
+    output: &mut Vec<u8>,
+) {
+    // Convert SequenceOut to the decoder Sequence format
+    let sequences: Vec<crate::blocks::sequence_section::Sequence> = sequences_out
+        .iter()
+        .map(|s| crate::blocks::sequence_section::Sequence {
+            ll: s.lit_len,
+            ml: s.match_len,
+            of: s.off_base,
+        })
+        .collect();
+
+    let mut writer = BitWriter::from(output);
+
+    // Literals section
+    if literals_vec.len() > 1024 {
+        if let Some(table) =
+            compress_literals(literals_vec, state.last_huff_table.as_ref(), &mut writer)
+        {
+            state.last_huff_table.replace(table);
+        }
+    } else {
+        raw_literals(literals_vec, &mut writer);
+    }
+
+    // Sequences section
+    if sequences.is_empty() {
+        writer.write_bits(0u8, 8);
+    } else {
+        encode_seqnum(sequences.len(), &mut writer);
+
+        let ll_mode = choose_table(
+            state.fse_tables.ll_previous.as_ref(),
+            &state.fse_tables.ll_default,
+            sequences.iter().map(|seq| encode_literal_length(seq.ll).0),
+            9,
+        );
+        let ml_mode = choose_table(
+            state.fse_tables.ml_previous.as_ref(),
+            &state.fse_tables.ml_default,
+            sequences.iter().map(|seq| encode_match_len(seq.ml).0),
+            9,
+        );
+        let of_mode = choose_table(
+            state.fse_tables.of_previous.as_ref(),
+            &state.fse_tables.of_default,
+            sequences.iter().map(|seq| encode_offset(seq.of).0),
+            8,
+        );
+
+        writer.write_bits(encode_fse_table_modes(&ll_mode, &ml_mode, &of_mode), 8);
+
+        encode_table(&ll_mode, &mut writer);
+        encode_table(&of_mode, &mut writer);
+        encode_table(&ml_mode, &mut writer);
+
+        encode_sequences(
+            &sequences,
+            &mut writer,
+            ll_mode.as_ref(),
+            ml_mode.as_ref(),
+            of_mode.as_ref(),
+        );
+
+        if let FseTableMode::Encoded(table) = ll_mode {
+            state.fse_tables.ll_previous = Some(table)
+        }
+        if let FseTableMode::Encoded(table) = ml_mode {
+            state.fse_tables.ml_previous = Some(table)
+        }
+        if let FseTableMode::Encoded(table) = of_mode {
+            state.fse_tables.of_previous = Some(table)
+        }
+    }
+    writer.flush();
+}
+
 fn raw_literals(literals: &[u8], writer: &mut BitWriter<&mut Vec<u8>>) {
     writer.write_bits(0u8, 2);
     writer.write_bits(0b11u8, 2);

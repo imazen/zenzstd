@@ -46,27 +46,36 @@ pub fn compress_to_vec<R: Read>(source: R, level: CompressionLevel) -> Vec<u8> {
 /// The compression mode used impacts the speed of compression,
 /// and resulting compression ratios. Faster compression will result
 /// in worse compression ratios, and vice versa.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum CompressionLevel {
     /// This level does not compress the data at all, and simply wraps
     /// it in a Zstandard frame.
     Uncompressed,
-    /// This level is roughly equivalent to Zstd compression level 1
+    /// This level is roughly equivalent to Zstd compression level 1.
+    /// Uses the legacy ruzstd matcher.
     Fastest,
-    /// This level is roughly equivalent to Zstd level 3,
-    /// or the one used by the official compressor when no level
-    /// is specified.
-    ///
-    /// UNIMPLEMENTED
+    /// Zstd compression level 3 (the default when no level is specified).
     Default,
-    /// This level is roughly equivalent to Zstd level 7.
-    ///
-    /// UNIMPLEMENTED
+    /// Zstd compression level 7.
     Better,
-    /// This level is roughly equivalent to Zstd level 11.
-    ///
-    /// UNIMPLEMENTED
+    /// Zstd compression level 11.
     Best,
+    /// Explicit zstd compression level (1-22).
+    Level(i32),
+}
+
+impl CompressionLevel {
+    /// Convert to a numeric zstd level (1-22).
+    pub fn to_level(self) -> i32 {
+        match self {
+            CompressionLevel::Uncompressed => 0,
+            CompressionLevel::Fastest => 1,
+            CompressionLevel::Default => 3,
+            CompressionLevel::Better => 7,
+            CompressionLevel::Best => 11,
+            CompressionLevel::Level(n) => n.clamp(1, 22),
+        }
+    }
 }
 
 /// Trait used by the encoder that users can use to extend the matching facilities with their own algorithm
