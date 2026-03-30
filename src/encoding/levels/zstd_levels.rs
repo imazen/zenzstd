@@ -3,14 +3,15 @@
 use alloc::vec::Vec;
 
 use crate::common::MAX_BLOCK_SIZE;
+use crate::encoding::Matcher;
 use crate::encoding::block_header::BlockHeader;
 use crate::encoding::blocks::encode_compressed_block;
 use crate::encoding::compress_params::params_for_level;
 use crate::encoding::frame_compressor::CompressState;
 use crate::encoding::zstd_match::compress_block_zstd;
-use crate::encoding::Matcher;
 
 /// Compress a single block at the specified zstd compression level (1-22).
+#[allow(clippy::too_many_arguments)]
 pub fn compress_level<M: Matcher>(
     state: &mut CompressState<M>,
     last_block: bool,
@@ -18,12 +19,13 @@ pub fn compress_level<M: Matcher>(
     level: i32,
     src_size: Option<u64>,
     output: &mut Vec<u8>,
+    dict_content: Option<&[u8]>,
+    dict_rep_offsets: Option<[u32; 3]>,
 ) {
     let block_size = uncompressed_data.len() as u32;
 
     // Check for RLE (entire block is one byte repeated)
-    if !uncompressed_data.is_empty()
-        && uncompressed_data.iter().all(|&x| x == uncompressed_data[0])
+    if !uncompressed_data.is_empty() && uncompressed_data.iter().all(|&x| x == uncompressed_data[0])
     {
         let header = BlockHeader {
             last_block,
@@ -38,8 +40,16 @@ pub fn compress_level<M: Matcher>(
     // Get compression parameters for this level
     let params = params_for_level(level, src_size);
 
-    // Run the match finder
-    let compressed_block = compress_block_zstd(uncompressed_data, &params);
+    // Run the match finder, with optional dictionary
+    let compressed_block = match dict_content {
+        Some(dict) if !dict.is_empty() => {
+            let rep = dict_rep_offsets.as_ref().unwrap_or(&[1, 4, 8]);
+            super::super::zstd_match::compress_block_zstd_with_dict(
+                uncompressed_data, &params, dict, rep,
+            )
+        }
+        _ => compress_block_zstd(uncompressed_data, &params),
+    };
 
     // If no sequences were found, store as raw
     if compressed_block.sequences.is_empty() {

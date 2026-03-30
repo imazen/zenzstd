@@ -150,7 +150,7 @@ impl FSETable {
         let probability_sum = 1 << self.acc_log();
 
         let mut prob_idx = 0;
-        while probability_counter < probability_sum {
+        while probability_counter < probability_sum && prob_idx < self.states.len() {
             let max_remaining_value = probability_sum - probability_counter + 1;
             let bits_to_write = max_remaining_value.ilog2() + 1;
             let low_threshold = ((1 << bits_to_write) - 1) - (max_remaining_value);
@@ -173,7 +173,9 @@ impl FSETable {
                 probability_counter += prob as usize;
             } else {
                 let mut zeros = 0u8;
-                while self.states[prob_idx].probability == 0 {
+                while prob_idx < self.states.len()
+                    && self.states[prob_idx].probability == 0
+                {
                     zeros += 1;
                     prob_idx += 1;
                     if zeros == 3 {
@@ -301,10 +303,19 @@ fn build_table_from_counts(counts: &[usize], max_log: u8, avoid_0_numbit: bool) 
         let max = *max;
 
         // find first occurence of the second_max to avoid lifting the last zero
-        let second_max = *probs.iter_mut().filter(|x| **x != max).max().unwrap();
-        let second_max = probs.iter_mut().find(|x| **x == second_max).unwrap();
-        *second_max += redistribute;
-        assert!(*second_max <= max);
+        if let Some(&second_max) = probs.iter().filter(|&&x| x > 0 && x != max).max() {
+            let second_max = probs.iter_mut().find(|x| **x == second_max).unwrap();
+            *second_max += redistribute;
+            assert!(*second_max <= max);
+        } else if let Some(dummy) = probs.iter_mut().find(|x| **x == 0) {
+            // Single non-zero symbol: give remainder to a zero-prob slot
+            *dummy = redistribute;
+        } else {
+            // Only one element, can't redistribute; undo
+            // This can happen with genuinely single-symbol data
+            let max_again = probs.iter_mut().max().unwrap();
+            *max_again += redistribute;
+        }
     }
 
     build_table_from_probabilities(probs, acc_log)

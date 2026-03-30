@@ -16,7 +16,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::compress_params::{CompressionParams, Strategy};
-use super::hash::{count_match, hash8, hash_ptr};
+use super::hash::{count_match, hash_ptr, hash8};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -232,7 +232,11 @@ impl MatchCandidate {
             1i64
         } else {
             let real_offset = self.off_base - 3;
-            if real_offset == 0 { 1 } else { real_offset.ilog2() as i64 + 1 }
+            if real_offset == 0 {
+                1
+            } else {
+                real_offset.ilog2() as i64 + 1
+            }
         };
         (self.match_len as i64) * 4 - offset_cost
     }
@@ -264,24 +268,51 @@ impl MatchCandidate {
 /// - `off_base` 1-3: repeat offsets
 /// - `off_base` >= 4: real_offset = off_base - 3
 pub fn compress_block_zstd(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    compress_block_zstd_with_dict(src, params, &[], &[1, 4, 8])
+}
+
+/// Compress a single block with optional dictionary content prepended as match history.
+pub fn compress_block_zstd_with_dict(
+    src: &[u8],
+    params: &CompressionParams,
+    dict_content: &[u8],
+    initial_rep_offsets: &[u32; 3],
+) -> CompressedBlock {
     if src.is_empty() {
         return CompressedBlock {
             literals: Vec::new(),
             sequences: Vec::new(),
         };
     }
-
+    if dict_content.is_empty() {
+        return match params.strategy {
+            Strategy::Fast => compress_fast(src, params),
+            Strategy::DFast => compress_dfast(src, params),
+            Strategy::Greedy => compress_greedy(src, params),
+            Strategy::Lazy => compress_lazy(src, params),
+            Strategy::Lazy2
+            | Strategy::BtLazy2
+            | Strategy::BtOpt
+            | Strategy::BtUltra
+            | Strategy::BtUltra2 => compress_lazy2(src, params),
+        };
+    }
+    let dict_len = dict_content.len();
+    let mut combined = Vec::with_capacity(dict_len + src.len());
+    combined.extend_from_slice(dict_content);
+    combined.extend_from_slice(src);
     match params.strategy {
-        Strategy::Fast => compress_fast(src, params),
-        Strategy::DFast => compress_dfast(src, params),
-        Strategy::Greedy => compress_greedy(src, params),
-        Strategy::Lazy => compress_lazy(src, params),
-        // Lazy2 and all BT* strategies fall back to lazy2
+        Strategy::Fast => compress_fast_dict(&combined, dict_len, params, initial_rep_offsets),
+        Strategy::DFast => compress_dfast_dict(&combined, dict_len, params, initial_rep_offsets),
+        Strategy::Greedy => compress_greedy_dict(&combined, dict_len, params, initial_rep_offsets),
+        Strategy::Lazy => compress_lazy_dict(&combined, dict_len, params, initial_rep_offsets),
         Strategy::Lazy2
         | Strategy::BtLazy2
         | Strategy::BtOpt
         | Strategy::BtUltra
-        | Strategy::BtUltra2 => compress_lazy2(src, params),
+        | Strategy::BtUltra2 => {
+            compress_lazy2_dict(&combined, dict_len, params, initial_rep_offsets)
+        }
     }
 }
 
@@ -712,8 +743,15 @@ fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
         // Lazy: check pos+1 for a better match
         if pos + 1 < end {
             let lit_len1 = (pos + 1 - anchor) as u32;
-            let match1 =
-                search_hash_chain(src, pos + 1, &mut htable, &mut chain, &rep, params, lit_len1);
+            let match1 = search_hash_chain(
+                src,
+                pos + 1,
+                &mut htable,
+                &mut chain,
+                &rep,
+                params,
+                lit_len1,
+            );
 
             if let Some(m1) = match1 {
                 if match0.is_better_lazy(&m1) {
@@ -793,8 +831,15 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
 
         if pos + 1 < end {
             let lit_len1 = (pos + 1 - anchor) as u32;
-            let match1 =
-                search_hash_chain(src, pos + 1, &mut htable, &mut chain, &rep, params, lit_len1);
+            let match1 = search_hash_chain(
+                src,
+                pos + 1,
+                &mut htable,
+                &mut chain,
+                &rep,
+                params,
+                lit_len1,
+            );
 
             if let Some(m1) = match1 {
                 if best_match.is_better_lazy(&m1) {
@@ -844,7 +889,8 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
             // so we need to insert everything from pos+1 that wasn't already searched.
             // The searched positions were: pos, and pos+1 (and pos+2 for lazy2).
             // Those were inserted by search_hash_chain. So skip them.
-            let already_inserted = p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
+            let already_inserted =
+                p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
             if !already_inserted {
                 insert_hash_chain(src, p, &mut htable, &mut chain, params);
             }
@@ -854,6 +900,338 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     }
 
     build_block(src, sequences, literals, anchor)
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary-aware compression
+// ---------------------------------------------------------------------------
+
+fn build_block_dict(
+    combined: &[u8],
+    dict_len: usize,
+    sequences: Vec<SequenceOut>,
+    literals: Vec<u8>,
+    anchor: usize,
+) -> CompressedBlock {
+    let mut lits = literals;
+    if anchor < combined.len() {
+        lits.extend_from_slice(&combined[anchor..]);
+    }
+    CompressedBlock {
+        literals: lits,
+        sequences,
+    }
+}
+
+fn prefill_hash_table(htable: &mut HashTable, combined: &[u8], dict_len: usize, min_match: u32) {
+    if dict_len < 8 {
+        return;
+    }
+    let end = dict_len.saturating_sub(7);
+    for pos in 0..end {
+        let h = hash_ptr(&combined[pos..], htable.hash_log, min_match);
+        htable.insert(h, pos as u32);
+    }
+}
+
+fn prefill_hash_chain(
+    htable: &mut HashTable,
+    chain: &mut ChainTable,
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+) {
+    if dict_len < 8 {
+        return;
+    }
+    let end = dict_len.saturating_sub(7);
+    for pos in 0..end {
+        let h = hash_ptr(&combined[pos..], params.hash_log, params.min_match);
+        let prev = htable.get(h);
+        htable.insert(h, pos as u32);
+        chain.insert(pos as u32, prev);
+    }
+}
+
+fn compress_fast_dict(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let min_match = params.min_match.max(4);
+    let hash_log = params.hash_log;
+    let step_factor = 1usize << params.search_log;
+    let mut htable = HashTable::new(hash_log);
+    prefill_hash_table(&mut htable, combined, dict_len, min_match);
+    let mut rep = RepCodes {
+        rep: *initial_rep,
+    };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+    while pos < end {
+        let step = ((pos - anchor) / step_factor) + 1;
+        if let Some(rm) = try_repcodes(combined, pos, &rep, min_match, (pos - anchor) as u32) {
+            let ll = (pos - anchor) as u32;
+            literals.extend_from_slice(&combined[anchor..pos]);
+            let seq = SequenceOut { off_base: rm.off_base, lit_len: ll, match_len: rm.match_len };
+            rep.update(seq.off_base, ll);
+            sequences.push(seq);
+            pos += rm.match_len as usize;
+            anchor = pos;
+            continue;
+        }
+        let (_h, mp) = htable.lookup_and_insert(combined, pos, min_match);
+        let mp = mp as usize;
+        if mp >= pos || (pos - mp) > params.window_size() {
+            pos += step;
+            continue;
+        }
+        let ml = count_match(&combined[pos..], &combined[mp..]);
+        if ml < min_match as usize {
+            pos += step;
+            continue;
+        }
+        let ll = (pos - anchor) as u32;
+        literals.extend_from_slice(&combined[anchor..pos]);
+        let ro = (pos - mp) as u32;
+        let seq = SequenceOut { off_base: ro + 3, lit_len: ll, match_len: ml as u32 };
+        rep.update(seq.off_base, ll);
+        sequences.push(seq);
+        let me = pos + ml;
+        pos += 1;
+        let ie = me.min(end);
+        while pos < ie {
+            let h = hash_ptr(&combined[pos..], hash_log, min_match);
+            htable.insert(h, pos as u32);
+            pos += 1;
+        }
+        pos = me;
+        anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+fn compress_dfast_dict(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let min_match = params.min_match.max(4);
+    let hash_log = params.hash_log;
+    let long_hash_log = hash_log.min(27);
+    let mut short_table = HashTable::new(hash_log);
+    let mut long_table = HashTable::new(long_hash_log);
+    prefill_hash_table(&mut short_table, combined, dict_len, min_match);
+    if dict_len >= 8 {
+        let end = dict_len.saturating_sub(7);
+        for pos in 0..end {
+            let lh = hash8(&combined[pos..], long_hash_log);
+            long_table.insert(lh, pos as u32);
+        }
+    }
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+    while pos < end {
+        if let Some(rm) = try_repcodes(combined, pos, &rep, min_match, (pos - anchor) as u32) {
+            let ll = (pos - anchor) as u32;
+            literals.extend_from_slice(&combined[anchor..pos]);
+            let seq = SequenceOut { off_base: rm.off_base, lit_len: ll, match_len: rm.match_len };
+            rep.update(seq.off_base, ll);
+            sequences.push(seq);
+            pos += rm.match_len as usize;
+            anchor = pos;
+            continue;
+        }
+        let sh = hash_ptr(&combined[pos..], hash_log, min_match);
+        let sp = short_table.get(sh) as usize;
+        short_table.insert(sh, pos as u32);
+        let lh = hash8(&combined[pos..], long_hash_log);
+        let lp = long_table.get(lh) as usize;
+        long_table.insert(lh, pos as u32);
+        let mut best: Option<MatchCandidate> = None;
+        if lp < pos && (pos - lp) <= params.window_size() {
+            let ml = count_match(&combined[pos..], &combined[lp..]);
+            if ml >= min_match as usize {
+                best = Some(MatchCandidate { off_base: (pos - lp) as u32 + 3, match_len: ml as u32 });
+            }
+        }
+        if sp < pos && (pos - sp) <= params.window_size() {
+            let ml = count_match(&combined[pos..], &combined[sp..]);
+            if ml >= min_match as usize {
+                let c = MatchCandidate { off_base: (pos - sp) as u32 + 3, match_len: ml as u32 };
+                if best.map_or(true, |b| c.match_len > b.match_len) { best = Some(c); }
+            }
+        }
+        if let Some(m) = best {
+            let ll = (pos - anchor) as u32;
+            literals.extend_from_slice(&combined[anchor..pos]);
+            let seq = SequenceOut { off_base: m.off_base, lit_len: ll, match_len: m.match_len };
+            rep.update(seq.off_base, ll);
+            sequences.push(seq);
+            let me = pos + m.match_len as usize;
+            pos += 1;
+            let ie = me.min(end);
+            while pos < ie {
+                let s = hash_ptr(&combined[pos..], hash_log, min_match);
+                short_table.insert(s, pos as u32);
+                let l = hash8(&combined[pos..], long_hash_log);
+                long_table.insert(l, pos as u32);
+                pos += 1;
+            }
+            pos = me;
+            anchor = pos;
+        } else {
+            pos += 1;
+        }
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+fn compress_greedy_dict(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut htable = HashTable::new(params.hash_log);
+    let mut chain = ChainTable::new(params.chain_log);
+    prefill_hash_chain(&mut htable, &mut chain, combined, dict_len, params);
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let best = search_hash_chain(combined, pos, &mut htable, &mut chain, &rep, params, ll);
+        if let Some(m) = best {
+            literals.extend_from_slice(&combined[anchor..pos]);
+            let seq = SequenceOut { off_base: m.off_base, lit_len: ll, match_len: m.match_len };
+            rep.update(seq.off_base, ll);
+            sequences.push(seq);
+            let me = pos + m.match_len as usize;
+            for p in (pos + 1)..me.min(end) { insert_hash_chain(combined, p, &mut htable, &mut chain, params); }
+            pos = me;
+            anchor = pos;
+        } else {
+            pos += 1;
+        }
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+fn compress_lazy_dict(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut htable = HashTable::new(params.hash_log);
+    let mut chain = ChainTable::new(params.chain_log);
+    prefill_hash_chain(&mut htable, &mut chain, combined, dict_len, params);
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let m0 = match search_hash_chain(combined, pos, &mut htable, &mut chain, &rep, params, ll) {
+            Some(m) => m,
+            None => { pos += 1; continue; }
+        };
+        if pos + 1 < end {
+            let ll1 = (pos + 1 - anchor) as u32;
+            if let Some(m1) = search_hash_chain(combined, pos + 1, &mut htable, &mut chain, &rep, params, ll1) {
+                if m0.is_better_lazy(&m1) {
+                    let llo = (pos + 1 - anchor) as u32;
+                    literals.extend_from_slice(&combined[anchor..pos + 1]);
+                    let seq = SequenceOut { off_base: m1.off_base, lit_len: llo, match_len: m1.match_len };
+                    rep.update(seq.off_base, llo);
+                    sequences.push(seq);
+                    let me = pos + 1 + m1.match_len as usize;
+                    for p in (pos + 2)..me.min(end) { insert_hash_chain(combined, p, &mut htable, &mut chain, params); }
+                    pos = me;
+                    anchor = pos;
+                    continue;
+                }
+            }
+        }
+        literals.extend_from_slice(&combined[anchor..pos]);
+        let seq = SequenceOut { off_base: m0.off_base, lit_len: ll, match_len: m0.match_len };
+        rep.update(seq.off_base, ll);
+        sequences.push(seq);
+        let me = pos + m0.match_len as usize;
+        for p in (pos + 1)..me.min(end) { insert_hash_chain(combined, p, &mut htable, &mut chain, params); }
+        pos = me;
+        anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+fn compress_lazy2_dict(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut htable = HashTable::new(params.hash_log);
+    let mut chain = ChainTable::new(params.chain_log);
+    prefill_hash_chain(&mut htable, &mut chain, combined, dict_len, params);
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let m0 = match search_hash_chain(combined, pos, &mut htable, &mut chain, &rep, params, ll) {
+            Some(m) => m,
+            None => { pos += 1; continue; }
+        };
+        let mut best_pos = pos;
+        let mut best_match = m0;
+        if pos + 1 < end {
+            let ll1 = (pos + 1 - anchor) as u32;
+            if let Some(m1) = search_hash_chain(combined, pos + 1, &mut htable, &mut chain, &rep, params, ll1) {
+                if best_match.is_better_lazy(&m1) {
+                    best_pos = pos + 1;
+                    best_match = m1;
+                    if pos + 2 < end {
+                        let ll2 = (pos + 2 - anchor) as u32;
+                        if let Some(m2) = search_hash_chain(combined, pos + 2, &mut htable, &mut chain, &rep, params, ll2) {
+                            if best_match.is_better_lazy(&m2) { best_pos = pos + 2; best_match = m2; }
+                        }
+                    }
+                }
+            }
+        }
+        let llo = (best_pos - anchor) as u32;
+        literals.extend_from_slice(&combined[anchor..best_pos]);
+        let seq = SequenceOut { off_base: best_match.off_base, lit_len: llo, match_len: best_match.match_len };
+        rep.update(seq.off_base, llo);
+        sequences.push(seq);
+        let me = best_pos + best_match.match_len as usize;
+        for p in (pos + 1)..me.min(end) {
+            let already = p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
+            if !already { insert_hash_chain(combined, p, &mut htable, &mut chain, params); }
+        }
+        pos = me;
+        anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
 }
 
 // ---------------------------------------------------------------------------
@@ -974,11 +1352,7 @@ mod tests {
             "expected sequences for all-zero input"
         );
         // Most sequences should be repcode matches (off_base 1-3)
-        let rep_count = block
-            .sequences
-            .iter()
-            .filter(|s| s.off_base <= 3)
-            .count();
+        let rep_count = block.sequences.iter().filter(|s| s.off_base <= 3).count();
         assert!(
             rep_count > block.sequences.len() / 2,
             "expected mostly repcodes for all-zero input, got {rep_count}/{} rep matches",
@@ -1230,7 +1604,7 @@ mod tests {
     #[test]
     fn round_trip_via_full_encoder() {
         use crate::decoding::FrameDecoder;
-        use crate::encoding::{compress_to_vec, CompressionLevel};
+        use crate::encoding::{CompressionLevel, compress_to_vec};
 
         let mut src = Vec::new();
         src.extend_from_slice(b"Hello, world! ");

@@ -1,15 +1,15 @@
 //! Utilities and interfaces for encoding an entire frame. Allows reusing resources
 
-use alloc::vec::Vec;
-use core::convert::TryInto;
 #[cfg(feature = "hash")]
 use crate::xxhash64::XxHash64;
+use alloc::vec::Vec;
+use core::convert::TryInto;
 
 use super::{
-    block_header::BlockHeader, frame_header::FrameHeader, levels::*,
-    match_generator::MatchGeneratorDriver, CompressionLevel, Matcher,
+    CompressionLevel, EncoderDictionary, Matcher, block_header::BlockHeader,
+    frame_header::FrameHeader, levels::*, match_generator::MatchGeneratorDriver,
 };
-use crate::fse::fse_encoder::{default_ll_table, default_ml_table, default_of_table, FSETable};
+use crate::fse::fse_encoder::{FSETable, default_ll_table, default_ml_table, default_of_table};
 
 use crate::io::{Read, Write};
 
@@ -36,6 +36,7 @@ pub struct FrameCompressor<R: Read, W: Write, M: Matcher> {
     uncompressed_data: Option<R>,
     compressed_data: Option<W>,
     compression_level: CompressionLevel,
+    dictionary: Option<EncoderDictionary>,
     state: CompressState<M>,
     #[cfg(feature = "hash")]
     hasher: XxHash64,
@@ -76,6 +77,7 @@ impl<R: Read, W: Write> FrameCompressor<R, W, MatchGeneratorDriver> {
             uncompressed_data: None,
             compressed_data: None,
             compression_level,
+            dictionary: None,
             state: CompressState {
                 matcher: MatchGeneratorDriver::new(1024 * 128, 1),
                 last_huff_table: None,
@@ -93,6 +95,7 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
         Self {
             uncompressed_data: None,
             compressed_data: None,
+            dictionary: None,
             state: CompressState {
                 matcher,
                 last_huff_table: None,
@@ -118,6 +121,20 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
         self.compressed_data.replace(compressed_data)
     }
 
+    /// Set a dictionary to use during compression.
+    ///
+    /// When a dictionary is set, the dictionary ID is written into the frame header
+    /// and the dictionary content is used as match history for finding back-references.
+    /// The decoder must use the same dictionary (matched by ID) to decompress.
+    pub fn set_dictionary(&mut self, dictionary: EncoderDictionary) -> Option<EncoderDictionary> {
+        self.dictionary.replace(dictionary)
+    }
+
+    /// Clear the dictionary so subsequent frames are compressed without one.
+    pub fn clear_dictionary(&mut self) -> Option<EncoderDictionary> {
+        self.dictionary.take()
+    }
+
     /// Compress the uncompressed data from the provided source as one Zstd frame and write it to the provided drain
     ///
     /// This will repeatedly call [Read::read] on the source to fill up blocks until the source returns 0 on the read call.
@@ -129,22 +146,28 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
         // Clearing buffers to allow re-using of the compressor
         self.state.matcher.reset(self.compression_level);
         self.state.last_huff_table = None;
+        #[cfg(feature = "hash")]
+        {
+            self.hasher = XxHash64::with_seed(0);
+        }
         let source = self.uncompressed_data.as_mut().unwrap();
         let drain = self.compressed_data.as_mut().unwrap();
-        // As the frame is compressed, it's stored here
         let output: &mut Vec<u8> = &mut Vec::with_capacity(1024 * 130);
-        // First write the frame header
+
+        let dict_id = self.dictionary.as_ref().map(|d| d.id as u64);
+
         let header = FrameHeader {
             frame_content_size: None,
             single_segment: false,
             content_checksum: cfg!(feature = "hash"),
-            dictionary_id: None,
+            dictionary_id: dict_id,
             window_size: Some(self.state.matcher.window_size()),
         };
         header.serialize(output);
-        // Now compress block by block
+
+        let mut is_first_block = true;
+
         loop {
-            // Read a single block's worth of uncompressed data from the input
             let mut uncompressed_data = self.state.matcher.get_next_space();
             let mut read_bytes = 0;
             let last_block;
@@ -161,22 +184,22 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                 }
             }
             uncompressed_data.resize(read_bytes, 0);
-            // As we read, hash that data too
             #[cfg(feature = "hash")]
             self.hasher.write(&uncompressed_data);
-            // Special handling is needed for compression of a totally empty file (why you'd want to do that, I don't know)
             if uncompressed_data.is_empty() {
                 let header = BlockHeader {
                     last_block: true,
                     block_type: crate::blocks::block::BlockType::Raw,
                     block_size: 0,
                 };
-                // Write the header, then the block
                 header.serialize(output);
                 drain.write_all(output).unwrap();
                 output.clear();
                 break;
             }
+
+            let dict_content = self.dictionary.as_ref().map(|d| d.content.as_slice());
+            let dict_rep = self.dictionary.as_ref().map(|d| d.offset_hist);
 
             match self.compression_level {
                 CompressionLevel::Uncompressed => {
@@ -196,6 +219,8 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                 | CompressionLevel::Best
                 | CompressionLevel::Level(_) => {
                     let level = self.compression_level.to_level();
+                    let dict_for_block = if is_first_block { dict_content } else { None };
+                    let rep_for_block = if is_first_block { dict_rep } else { None };
                     super::levels::zstd_levels::compress_level(
                         &mut self.state,
                         last_block,
@@ -203,12 +228,14 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                         level,
                         None,
                         output,
+                        dict_for_block,
+                        rep_for_block,
                     );
-                    // Still need to feed the matcher for window management
                     self.state.matcher.commit_space(uncompressed_data);
                     self.state.matcher.skip_matching();
                 }
             }
+            is_first_block = false;
             drain.write_all(output).unwrap();
             output.clear();
             if last_block {
@@ -467,5 +494,195 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Dictionary compression tests
+    // -------------------------------------------------------------------
+
+    fn make_test_dict_content() -> Vec<u8> {
+        let mut content = Vec::new();
+        for _ in 0..20 {
+            content.extend_from_slice(b"the quick brown fox jumps over the lazy dog ");
+        }
+        content
+    }
+
+    fn make_raw_dict(id: u32, content: &[u8]) -> super::EncoderDictionary {
+        super::EncoderDictionary::new_raw(id, content.to_vec())
+    }
+
+    #[test]
+    fn dict_compress_default_roundtrip_our_decoder() {
+        let dict_content = make_test_dict_content();
+        let dict = make_raw_dict(42, &dict_content);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(b"the quick brown fox jumps over ");
+        data.extend_from_slice(b"something unique here ");
+        data.extend_from_slice(b"the lazy dog the quick brown fox ");
+        for _ in 0..10 {
+            data.extend_from_slice(b"the quick brown fox jumps over the lazy dog ");
+        }
+
+        let compressed = crate::encoding::compress_to_vec_with_dict(
+            data.as_slice(),
+            super::CompressionLevel::Default,
+            &dict,
+        );
+
+        let mut decoder = FrameDecoder::new();
+        let decoding_dict = crate::decoding::dictionary::Dictionary {
+            id: 42,
+            fse: crate::decoding::scratch::FSEScratch::new(),
+            huf: crate::decoding::scratch::HuffmanScratch::new(),
+            dict_content: dict_content.clone(),
+            offset_hist: [1, 4, 8],
+        };
+        decoder.add_dict(decoding_dict).unwrap();
+        let mut decoded = Vec::with_capacity(data.len() + 1024);
+        decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
+        assert_eq!(decoded, data, "our decoder: dictionary roundtrip failed");
+    }
+
+    #[test]
+    fn dict_compress_c_zstd_can_decompress() {
+        let phrase = b"the quick brown fox jumps over the lazy dog ";
+        let mut samples: Vec<Vec<u8>> = Vec::new();
+        for i in 0..100 {
+            let mut sample = Vec::new();
+            for _ in 0..(3 + i % 5) {
+                sample.extend_from_slice(phrase);
+            }
+            sample.extend_from_slice(alloc::format!(" sample {i} ").as_bytes());
+            samples.push(sample);
+        }
+        let sample_refs: Vec<&[u8]> = samples.iter().map(|s| s.as_slice()).collect();
+        let trained_dict = zstd::dict::from_samples(&sample_refs, 4096)
+            .expect("failed to train dictionary with C zstd");
+
+        let encoder_dict = super::EncoderDictionary::parse(&trained_dict)
+            .expect("failed to parse trained dictionary");
+
+        let mut data = Vec::new();
+        for _ in 0..15 {
+            data.extend_from_slice(phrase);
+        }
+        data.extend_from_slice(b"and some unique trailing data!");
+
+        let compressed = crate::encoding::compress_to_vec_with_dict(
+            data.as_slice(),
+            super::CompressionLevel::Default,
+            &encoder_dict,
+        );
+
+        let mut decompressor = zstd::bulk::Decompressor::with_dictionary(&trained_dict)
+            .expect("C zstd failed to create decompressor with dictionary");
+        let decompressed = decompressor
+            .decompress(&compressed, 1 << 20)
+            .expect("C zstd failed to decompress with dictionary");
+
+        assert_eq!(decompressed, data, "C zstd: dictionary decompression mismatch");
+    }
+
+    #[test]
+    fn dict_compress_improves_ratio() {
+        let dict_content = make_test_dict_content();
+        let dict = make_raw_dict(99, &dict_content);
+
+        let mut data = Vec::new();
+        for _ in 0..5 {
+            data.extend_from_slice(b"the quick brown fox jumps over the lazy dog ");
+        }
+
+        let compressed_with = crate::encoding::compress_to_vec_with_dict(
+            data.as_slice(), super::CompressionLevel::Default, &dict);
+        let compressed_without = crate::encoding::compress_to_vec(
+            data.as_slice(), super::CompressionLevel::Default);
+
+        assert!(
+            compressed_with.len() <= compressed_without.len(),
+            "dict should not be worse: with={}, without={}",
+            compressed_with.len(), compressed_without.len(),
+        );
+    }
+
+    #[test]
+    fn dict_compress_multiple_levels() {
+        let dict_content = make_test_dict_content();
+        let dict = make_raw_dict(1, &dict_content);
+
+        let mut data = Vec::new();
+        for _ in 0..10 {
+            data.extend_from_slice(b"the quick brown fox jumps over the lazy dog ");
+        }
+        data.extend_from_slice(b"unique tail bytes");
+
+        for level in [
+            super::CompressionLevel::Default,
+            super::CompressionLevel::Better,
+            super::CompressionLevel::Best,
+            super::CompressionLevel::Level(5),
+            super::CompressionLevel::Level(9),
+        ] {
+            let compressed = crate::encoding::compress_to_vec_with_dict(
+                data.as_slice(), level, &dict);
+            let mut decoder = FrameDecoder::new();
+            let decoding_dict = crate::decoding::dictionary::Dictionary {
+                id: 1,
+                fse: crate::decoding::scratch::FSEScratch::new(),
+                huf: crate::decoding::scratch::HuffmanScratch::new(),
+                dict_content: dict_content.clone(),
+                offset_hist: [1, 4, 8],
+            };
+            decoder.add_dict(decoding_dict).unwrap();
+            let mut decoded = Vec::with_capacity(data.len() + 1024);
+            decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
+            assert_eq!(decoded, data, "dictionary roundtrip failed at level {level:?}");
+        }
+    }
+
+    #[test]
+    fn dict_frame_header_contains_dict_id() {
+        let dict = make_raw_dict(123, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let data = vec![0u8; 100];
+        let compressed = crate::encoding::compress_to_vec_with_dict(
+            data.as_slice(), super::CompressionLevel::Default, &dict);
+        let (header, _) = crate::decoding::frame::read_frame_header(compressed.as_slice()).unwrap();
+        assert_eq!(header.dictionary_id(), Some(123), "frame header should contain dictionary ID 123");
+    }
+
+    #[test]
+    fn dict_compress_empty_input() {
+        let dict = make_raw_dict(1, &make_test_dict_content());
+        let data: &[u8] = &[];
+        let compressed = crate::encoding::compress_to_vec_with_dict(
+            data, super::CompressionLevel::Default, &dict);
+        let mut decoder = FrameDecoder::new();
+        let decoding_dict = crate::decoding::dictionary::Dictionary {
+            id: 1,
+            fse: crate::decoding::scratch::FSEScratch::new(),
+            huf: crate::decoding::scratch::HuffmanScratch::new(),
+            dict_content: make_test_dict_content(),
+            offset_hist: [1, 4, 8],
+        };
+        decoder.add_dict(decoding_dict).unwrap();
+        let mut decoded = Vec::with_capacity(1024);
+        decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn encoder_dictionary_new_raw() {
+        let dict = super::EncoderDictionary::new_raw(42, vec![1, 2, 3]);
+        assert_eq!(dict.id, 42);
+        assert_eq!(dict.content, vec![1, 2, 3]);
+        assert_eq!(dict.offset_hist, [1, 4, 8]);
+    }
+
+    #[test]
+    #[should_panic(expected = "dictionary ID must be non-zero")]
+    fn encoder_dictionary_rejects_zero_id() {
+        super::EncoderDictionary::new_raw(0, vec![1, 2, 3]);
     }
 }

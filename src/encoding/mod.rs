@@ -16,6 +16,85 @@ pub use match_generator::MatchGeneratorDriver;
 
 use crate::io::{Read, Write};
 use alloc::vec::Vec;
+use core::convert::TryInto;
+
+/// A dictionary that can be used during compression to improve compression ratio
+/// on small or repetitive data.
+///
+/// Dictionaries are created by training on representative samples of the data
+/// to be compressed (see the `dict_builder` feature for training). This struct
+/// holds a pre-parsed dictionary for use with the encoder.
+///
+/// The dictionary can be either a "formatted" dictionary (with the zstd magic
+/// number, entropy tables, and repeat offsets) or "raw content" (just bytes to
+/// use as match history). For raw content dictionaries, a non-zero ID must be
+/// provided.
+///
+/// # Examples
+/// ```
+/// use zenzstd::encoding::EncoderDictionary;
+///
+/// // Create a raw content dictionary
+/// let dict_content = b"repeated phrase repeated phrase repeated phrase";
+/// let dict = EncoderDictionary::new_raw(42, dict_content.to_vec());
+///
+/// // Or parse a formatted dictionary (with zstd magic number)
+/// // let dict = EncoderDictionary::parse(&formatted_dict_bytes).unwrap();
+/// ```
+#[derive(Clone)]
+pub struct EncoderDictionary {
+    /// Dictionary ID. Must be non-zero. The decoder uses this to verify
+    /// it has the matching dictionary.
+    pub id: u32,
+    /// The raw content of the dictionary, used as match history that
+    /// logically precedes the data to compress.
+    pub content: Vec<u8>,
+    /// Initial repeat offsets. A formatted dictionary specifies these;
+    /// for raw content dictionaries the zstd defaults `[1, 4, 8]` are used.
+    pub offset_hist: [u32; 3],
+}
+
+impl EncoderDictionary {
+    /// Create a raw content dictionary with the given ID and content bytes.
+    ///
+    /// The ID must be non-zero. The default repeat offsets `[1, 4, 8]` are used.
+    ///
+    /// # Panics
+    /// Panics if `id` is zero.
+    pub fn new_raw(id: u32, content: Vec<u8>) -> Self {
+        assert!(id != 0, "dictionary ID must be non-zero");
+        Self {
+            id,
+            content,
+            offset_hist: [1, 4, 8],
+        }
+    }
+
+    /// Parse a formatted zstd dictionary (with magic number, entropy tables,
+    /// and repeat offsets).
+    ///
+    /// This extracts the dictionary ID, content, and repeat offsets. The entropy
+    /// tables are parsed and validated but not stored -- the encoder uses its own
+    /// entropy coding. Only the content and offsets are used during compression.
+    ///
+    /// Returns `None` if the dictionary is too short or has an invalid magic number.
+    pub fn parse(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 8 {
+            return None;
+        }
+        let magic: [u8; 4] = raw[..4].try_into().ok()?;
+        if magic != crate::decoding::dictionary::MAGIC_NUM {
+            return None;
+        }
+        // Use the decoding dictionary parser to extract fields
+        let decoded = crate::decoding::dictionary::Dictionary::decode_dict(raw).ok()?;
+        Some(Self {
+            id: decoded.id,
+            content: decoded.dict_content,
+            offset_hist: decoded.offset_hist,
+        })
+    }
+}
 
 /// Convenience function to compress some source into a target without reusing any resources of the compressor
 /// ```rust
@@ -40,6 +119,46 @@ pub fn compress<R: Read, W: Write>(source: R, target: W, level: CompressionLevel
 pub fn compress_to_vec<R: Read>(source: R, level: CompressionLevel) -> Vec<u8> {
     let mut vec = Vec::new();
     compress(source, &mut vec, level);
+    vec
+}
+
+/// Convenience function to compress with a dictionary.
+///
+/// ```rust
+/// use zenzstd::encoding::{compress_with_dict, CompressionLevel, EncoderDictionary};
+/// let dict = EncoderDictionary::new_raw(1, b"some dictionary content here".to_vec());
+/// let data: &[u8] = &[0,0,0,0,0,0,0,0,0,0,0,0];
+/// let mut target = Vec::new();
+/// compress_with_dict(data, &mut target, CompressionLevel::Default, &dict);
+/// ```
+pub fn compress_with_dict<R: Read, W: Write>(
+    source: R,
+    target: W,
+    level: CompressionLevel,
+    dict: &EncoderDictionary,
+) {
+    let mut frame_enc = FrameCompressor::new(level);
+    frame_enc.set_dictionary(dict.clone());
+    frame_enc.set_source(source);
+    frame_enc.set_drain(target);
+    frame_enc.compress();
+}
+
+/// Convenience function to compress with a dictionary into a Vec.
+///
+/// ```rust
+/// use zenzstd::encoding::{compress_to_vec_with_dict, CompressionLevel, EncoderDictionary};
+/// let dict = EncoderDictionary::new_raw(1, b"some dictionary content here".to_vec());
+/// let data: &[u8] = &[0,0,0,0,0,0,0,0,0,0,0,0];
+/// let compressed = compress_to_vec_with_dict(data, CompressionLevel::Default, &dict);
+/// ```
+pub fn compress_to_vec_with_dict<R: Read>(
+    source: R,
+    level: CompressionLevel,
+    dict: &EncoderDictionary,
+) -> Vec<u8> {
+    let mut vec = Vec::new();
+    compress_with_dict(source, &mut vec, level, dict);
     vec
 }
 
