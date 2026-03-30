@@ -14,11 +14,11 @@
 use alloc::vec::Vec;
 
 pub struct FlatBuffer {
-    buf: Vec<u8>,
+    pub(crate) buf: Vec<u8>,
     /// Write cursor: next byte goes at `buf[pos]`.
-    pos: usize,
+    pub(crate) pos: usize,
     /// Start of data not yet drained. `buf[drain_pos..pos]` is valid data.
-    drain_pos: usize,
+    pub(crate) drain_pos: usize,
     /// Window size: how many bytes to keep when compacting.
     window_size: usize,
 }

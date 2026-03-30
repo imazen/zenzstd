@@ -5,11 +5,11 @@ use super::flat_buffer::FlatBuffer;
 use crate::decoding::errors::DecodeBufferError;
 
 pub struct DecodeBuffer {
-    buffer: FlatBuffer,
+    pub(crate) buffer: FlatBuffer,
     pub dict_content: Vec<u8>,
 
     pub window_size: usize,
-    total_output_counter: u64,
+    pub(crate) total_output_counter: u64,
     #[cfg(feature = "hash")]
     pub hash: crate::xxhash64::XxHash64,
 }

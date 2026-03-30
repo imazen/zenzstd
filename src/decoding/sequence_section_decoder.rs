@@ -666,7 +666,14 @@ pub fn decode_and_execute_sequences(
 }
 
 /// Fused decode+execute for the common case (no RLE modes).
-/// Takes destructured scratch fields to avoid borrow conflicts.
+///
+/// Hot state (pos, total_output_counter, offset history) is hoisted to stack locals
+/// to eliminate indirect stores through DecodeBuffer -> FlatBuffer on every sequence.
+/// The profile shows 44% of this function's time is a single store instruction writing
+/// `FlatBuffer::pos` through the struct indirection — hoisting it to a register
+/// eliminates that L1 cache miss.
+///
+/// The struct fields are written back once at the end (or on error/dict-path exit).
 #[inline(always)]
 #[allow(clippy::needless_range_loop)]
 #[allow(clippy::too_many_arguments)]
@@ -695,6 +702,18 @@ fn fused_decode_execute_fast_inner(
     // eliminating per-call capacity checks.
     buffer.reserve(crate::common::MAX_BLOCK_SIZE as usize);
 
+    // --- Hoist hot state to stack locals ---
+    // These live in registers instead of being stored back to FlatBuffer.pos
+    // (through DecodeBuffer -> FlatBuffer indirection) on every push/repeat.
+    let drain_pos = buffer.buffer.drain_pos;
+    let mut pos = buffer.buffer.pos;
+    let mut total_out = buffer.total_output_counter;
+
+    // Hoist offset history to scalar locals — avoids array indexing overhead
+    let mut off1 = offset_hist[0];
+    let mut off2 = offset_hist[1];
+    let mut off3 = offset_hist[2];
+
     for seq_idx in 0..num_sequences {
         let (of_code, of_nbits, _of_baseline) = of_dec.decode_and_params();
         let (ml_code, ml_nbits, _ml_baseline) = ml_dec.decode_and_params();
@@ -704,6 +723,11 @@ fn fused_decode_execute_fast_inner(
         let (ml_value, ml_extra_bits) = lookup_ml_code(ml_code);
 
         if of_code > MAX_OFFSET_CODE {
+            buffer.buffer.pos = pos;
+            buffer.total_output_counter = total_out;
+            offset_hist[0] = off1;
+            offset_hist[1] = off2;
+            offset_hist[2] = off3;
             return Err(DecodeSequenceError::UnsupportedOffset {
                 offset_code: of_code,
             }
@@ -745,10 +769,20 @@ fn fused_decode_execute_fast_inner(
         let offset = obits as u32 + (1u32 << of_code);
 
         if offset == 0 {
+            buffer.buffer.pos = pos;
+            buffer.total_output_counter = total_out;
+            offset_hist[0] = off1;
+            offset_hist[1] = off2;
+            offset_hist[2] = off3;
             return Err(DecodeSequenceError::ZeroOffset.into());
         }
 
         if br.bits_remaining() < 0 {
+            buffer.buffer.pos = pos;
+            buffer.total_output_counter = total_out;
+            offset_hist[0] = off1;
+            offset_hist[1] = off2;
+            offset_hist[2] = off3;
             return Err(DecodeSequenceError::NotEnoughBytesForNumSequences.into());
         }
 
@@ -756,38 +790,101 @@ fn fused_decode_execute_fast_inner(
         let ll = (ll_value + ll_add as u32) as usize;
         let ml = (ml_value + ml_add as u32) as usize;
 
-        // Copy literals (no reserve check -- pre-reserved above)
+        // Copy literals — direct buf write, no method call overhead.
+        // Access buffer.buffer.buf directly to get &mut Vec<u8>.
         if ll > 0 {
             let high = literals_copy_counter + ll;
             if high > literals_len {
+                buffer.buffer.pos = pos;
+                buffer.total_output_counter = total_out;
+                offset_hist[0] = off1;
+                offset_hist[1] = off2;
+                offset_hist[2] = off3;
                 return Err(ExecuteSequencesError::NotEnoughBytesForSequence {
                     wanted: high,
                     have: literals_len,
                 }
                 .into());
             }
-            let literals = &literals_buffer[literals_copy_counter..high];
-            buffer.push_no_reserve(literals);
+            buffer.buffer.buf[pos..pos + ll]
+                .copy_from_slice(&literals_buffer[literals_copy_counter..high]);
+            pos += ll;
+            total_out += ll as u64;
             literals_copy_counter += ll;
         }
 
-        // Resolve offset and update history
-        let actual_offset = do_offset_history_inline(offset, ll as u32, offset_hist);
+        // Resolve offset and update history — fully inlined with stack locals
+        let actual_offset = do_offset_history_hoisted(offset, ll as u32, &mut off1, &mut off2, &mut off3);
         if actual_offset == 0 {
+            buffer.buffer.pos = pos;
+            buffer.total_output_counter = total_out;
+            offset_hist[0] = off1;
+            offset_hist[1] = off2;
+            offset_hist[2] = off3;
             return Err(ExecuteSequencesError::ZeroOffset.into());
         }
 
-        // Copy match (no reserve check -- pre-reserved above)
+        // Copy match — direct buf operations, no method call overhead
         if ml > 0 {
-            buffer.repeat_no_reserve(actual_offset as usize, ml)?;
+            let buf_len = pos - drain_pos; // logical length of buffer content
+            let actual_off = actual_offset as usize;
+
+            if actual_off > buf_len {
+                // Cold path: match references dictionary content.
+                // Write back state, delegate to DecodeBuffer method, re-hoist.
+                buffer.buffer.pos = pos;
+                buffer.total_output_counter = total_out;
+                offset_hist[0] = off1;
+                offset_hist[1] = off2;
+                offset_hist[2] = off3;
+                buffer.repeat_no_reserve(actual_off, ml)?;
+                pos = buffer.buffer.pos;
+                total_out = buffer.total_output_counter;
+            } else {
+                // Hot path: match is within the buffer — direct copy
+                let src_abs = drain_pos + (buf_len - actual_off);
+                let distance = pos - src_abs;
+
+                if distance >= ml {
+                    // Non-overlapping: single copy_within
+                    buffer.buffer.buf.copy_within(src_abs..src_abs + ml, pos);
+                } else if distance == 1 {
+                    // RLE: fill with repeated byte
+                    let byte = buffer.buffer.buf[src_abs];
+                    buffer.buffer.buf[pos..pos + ml].fill(byte);
+                } else {
+                    // Overlapping: doubling copy
+                    buffer.buffer.buf
+                        .copy_within(src_abs..src_abs + distance, pos);
+                    let mut written = distance;
+                    while written < ml {
+                        let copy_len = written.min(ml - written);
+                        buffer.buffer.buf
+                            .copy_within(pos..pos + copy_len, pos + written);
+                        written += copy_len;
+                    }
+                }
+                pos += ml;
+                total_out += ml as u64;
+            }
         }
     }
 
-    // Trailing literals
+    // Trailing literals — direct buf write
     if literals_copy_counter < literals_len {
-        let rest_literals = &literals_buffer[literals_copy_counter..];
-        buffer.push_no_reserve(rest_literals);
+        let remaining = literals_len - literals_copy_counter;
+        buffer.buffer.buf[pos..pos + remaining]
+            .copy_from_slice(&literals_buffer[literals_copy_counter..]);
+        pos += remaining;
+        total_out += remaining as u64;
     }
+
+    // --- Write back all hoisted state ---
+    buffer.buffer.pos = pos;
+    buffer.total_output_counter = total_out;
+    offset_hist[0] = off1;
+    offset_hist[1] = off2;
+    offset_hist[2] = off3;
 
     if br.bits_remaining() > 0 {
         Err(DecodeSequenceError::ExtraBits {
@@ -1003,6 +1100,65 @@ fn do_offset_history_inline(offset_value: u32, lit_len: u32, hist: &mut [u32; 3]
                 hist[2] = hist[1];
                 hist[1] = hist[0];
                 hist[0] = actual_offset;
+            }
+        }
+    }
+
+    actual_offset
+}
+
+/// Offset history resolution using hoisted stack locals instead of array indexing.
+/// Avoids array bounds checks and keeps all three offsets in registers.
+#[inline(always)]
+fn do_offset_history_hoisted(
+    offset_value: u32,
+    lit_len: u32,
+    off1: &mut u32,
+    off2: &mut u32,
+    off3: &mut u32,
+) -> u32 {
+    if offset_value > 3 {
+        let actual_offset = offset_value - 3;
+        *off3 = *off2;
+        *off2 = *off1;
+        *off1 = actual_offset;
+        return actual_offset;
+    }
+
+    let actual_offset;
+    if lit_len > 0 {
+        actual_offset = match offset_value {
+            1 => *off1,
+            2 => *off2,
+            _ => *off3,
+        };
+        match offset_value {
+            1 => {}
+            2 => {
+                *off2 = *off1;
+                *off1 = actual_offset;
+            }
+            _ => {
+                *off3 = *off2;
+                *off2 = *off1;
+                *off1 = actual_offset;
+            }
+        }
+    } else {
+        actual_offset = match offset_value {
+            1 => *off2,
+            2 => *off3,
+            _ => off1.wrapping_sub(1),
+        };
+        match offset_value {
+            1 => {
+                *off2 = *off1;
+                *off1 = actual_offset;
+            }
+            _ => {
+                *off3 = *off2;
+                *off2 = *off1;
+                *off1 = actual_offset;
             }
         }
     }
