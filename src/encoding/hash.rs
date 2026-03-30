@@ -156,19 +156,12 @@ pub fn hash_ptr(data: &[u8], hash_bits: u32, min_match_len: u32) -> usize {
 /// // count_match would return 5
 /// ```
 #[inline]
+/// Count matching bytes at the start of `a` and `b`.
+///
+/// Delegates to the SIMD-accelerated version when the `simd` feature is enabled.
+#[inline]
 pub fn count_match(a: &[u8], b: &[u8]) -> usize {
-    // Process in chunks of 8 for autovectorization, then handle the tail
-    // byte-by-byte. This is the same pattern used in the existing
-    // MatchGenerator::mismatch_chunks::<8>().
-    let chunk_count = core::iter::zip(a.chunks_exact(8), b.chunks_exact(8))
-        .take_while(|(x, y)| x == y)
-        .count();
-    let offset = chunk_count * 8;
-
-    offset
-        + core::iter::zip(&a[offset..], &b[offset..])
-            .take_while(|(x, y)| x == y)
-            .count()
+    super::simd::count_match(a, b)
 }
 
 #[cfg(test)]
