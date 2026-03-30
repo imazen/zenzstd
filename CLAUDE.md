@@ -16,6 +16,7 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 - `src/xxhash64.rs` — Pure Rust XXHash64 (replaces twox-hash dependency)
 - `src/fse/` — FSE (Finite State Entropy) encoder/decoder
 - `src/huff0/` — Huffman encoder/decoder
+- `block_splitter.rs` — Pre-split (fingerprint-based, port of C zstd_preSplit.c) + post-split (trial-encode sequence splitting)
 - `vendor/zstd/` — C zstd submodule for reference
 
 ## Key Design Decisions
@@ -54,15 +55,19 @@ zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 ## Known Issues
 
 ### L16-22 compression ratio gap (zen/c = 1.17 on mixed_100KB)
-The remaining gap at optimal parser levels is primarily caused by **missing block splitting**,
-not by the match finder. C zstd splits 100KB into 5 blocks (~20KB each) via `zstd_preSplit.c`,
-allowing per-block FSE/Huffman tables tuned to local statistics. Our encoder puts all data in
-one block with one set of tables. The match finder itself achieves 88.8% repcode matches and
-only 616 literal bytes on 100KB mixed data — very close to C's match quality. Next step:
-implement block splitting in `blocks/compressed.rs` or the streaming encoder.
+Block splitting is now implemented (both pre-split and post-split), but investigation showed the
+remaining 17% gap at L19 is caused by **entropy coding quality**, not block splitting. Trial
+encoding confirms that splitting our sequences into sub-blocks does not reduce total compressed
+size — the FSE/Huffman encoder produces similar output regardless of partition boundaries.
 
-Additionally, `blocks/compressed.rs` uses raw (uncompressed) literals when literal count <= 1024,
-which misses Huffman compression on small literal sections.
+C zstd benefits from block splitting because its entropy encoder has finer table optimization
+(repeat-last mode, better predefined table selection, lower table overhead). Our encoder always
+builds new FSE tables (`choose_table` hardcodes `use_new_table = true`) and uses raw literals
+for literal counts <= 1024, missing Huffman compression on small literal sections.
+
+**Root cause:** Entropy encoder quality, not match finder or block structure.
+**Next steps:** Improve FSE table mode selection (predefined/repeat), enable Huffman for small
+literal sections, and reduce FSE table encoding overhead.
 
 ## Features
 

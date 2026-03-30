@@ -29,7 +29,7 @@ magetypes = { path = "/home/lilith/work/archmage/magetypes", optional = true }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 rand = { version = "0.9.0", features = ["small_rng"] }
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
-zenbench = { path = "/home/lilith/work/zen/zenbench" }
+zenbench = "0.1.2"
 
 [[bench]]
 name = "decode_all"

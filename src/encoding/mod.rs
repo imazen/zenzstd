@@ -1,6 +1,7 @@
 //! Structures and utilities used for compressing/encoding data into the Zstd format.
 
 pub(crate) mod block_header;
+pub(crate) mod block_splitter;
 pub(crate) mod blocks;
 pub mod compress_params;
 pub(crate) mod frame_header;

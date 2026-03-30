@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use crate::common::MAX_BLOCK_SIZE;
 use crate::encoding::Matcher;
 use crate::encoding::block_header::BlockHeader;
+use crate::encoding::block_splitter;
 use crate::encoding::blocks::encode_compressed_block;
 use crate::encoding::compress_params::params_for_level;
 use crate::encoding::frame_compressor::CompressState;
@@ -96,23 +97,98 @@ pub fn compress_level<M: Matcher>(
         return;
     }
 
-    // Encode the compressed block — pre-allocate with estimated capacity.
-    // Typical compression ratio at L1 is ~0.5, so compressed size is roughly
-    // half the input. We allocate input size to avoid reallocation.
+    // Split the block's sequences into partitions for better per-block
+    // entropy tables when the data has varying statistical properties.
+    let partitions =
+        block_splitter::split_sequences(&compressed_block.literals, &compressed_block.sequences);
+
+    if partitions.len() <= 1 {
+        // No splitting: encode as a single block (common case for small/uniform data)
+        encode_single_block(
+            state,
+            last_block,
+            uncompressed_data,
+            &compressed_block.literals,
+            &compressed_block.sequences,
+            output,
+        );
+    } else {
+        // Multiple partitions: encode each as a separate zstd block.
+        // Track the source bytes consumed by each partition to compute
+        // per-block source sizes for raw fallback.
+        let n_parts = partitions.len();
+        let mut src_offset = 0;
+
+        for (i, partition) in partitions.iter().enumerate() {
+            let is_last_partition = i == n_parts - 1;
+            let sub_last_block = last_block && is_last_partition;
+
+            // Compute how many source bytes this partition covers:
+            // sum of lit_len + match_len for each sequence
+            let mut part_src_bytes: usize = partition
+                .sequences
+                .iter()
+                .map(|s| s.lit_len as usize + s.match_len as usize)
+                .sum();
+
+            // The last partition also gets trailing literals
+            if is_last_partition {
+                let seqs_src: usize = compressed_block
+                    .sequences
+                    .iter()
+                    .map(|s| s.lit_len as usize + s.match_len as usize)
+                    .sum();
+                part_src_bytes = uncompressed_data.len() - src_offset;
+                // Sanity: trailing literals are already accounted in the partition's literals
+                let _ = seqs_src; // avoid unused warning
+            }
+
+            let part_src = &uncompressed_data[src_offset..src_offset + part_src_bytes];
+
+            if partition.sequences.is_empty() {
+                // Partition with no sequences: emit as raw
+                let header = BlockHeader {
+                    last_block: sub_last_block,
+                    block_type: crate::blocks::block::BlockType::Raw,
+                    block_size: part_src_bytes as u32,
+                };
+                header.serialize(output);
+                output.extend_from_slice(part_src);
+            } else {
+                encode_single_block(
+                    state,
+                    sub_last_block,
+                    part_src,
+                    &partition.literals,
+                    &partition.sequences,
+                    output,
+                );
+            }
+
+            src_offset += part_src_bytes;
+        }
+    }
+}
+
+/// Encode a single compressed block from literals and sequences.
+/// Falls back to raw block if compression doesn't save space.
+fn encode_single_block<M: Matcher>(
+    state: &mut CompressState<M>,
+    last_block: bool,
+    uncompressed_data: &[u8],
+    literals: &[u8],
+    sequences: &[crate::encoding::zstd_match::SequenceOut],
+    output: &mut Vec<u8>,
+) {
     let mut compressed = Vec::with_capacity(uncompressed_data.len());
-    encode_compressed_block(
-        &compressed_block.literals,
-        &compressed_block.sequences,
-        state,
-        &mut compressed,
-    );
+    encode_compressed_block(literals, sequences, state, &mut compressed);
 
     // If compressed is larger than the original, store as raw
     if compressed.len() >= MAX_BLOCK_SIZE as usize || compressed.len() >= uncompressed_data.len() {
         let header = BlockHeader {
             last_block,
             block_type: crate::blocks::block::BlockType::Raw,
-            block_size,
+            block_size: uncompressed_data.len() as u32,
         };
         header.serialize(output);
         output.extend_from_slice(uncompressed_data);

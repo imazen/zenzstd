@@ -157,16 +157,6 @@ impl<W: io::Write> StreamingEncoder<W> {
             | CompressionLevel::Best
             | CompressionLevel::Level(_) => {
                 let level_num = self.level.to_level();
-                let dict_content = if self.is_first_block {
-                    self.dictionary.as_ref().map(|d| d.content.as_slice())
-                } else {
-                    None
-                };
-                let dict_rep = if self.is_first_block {
-                    self.dictionary.as_ref().map(|d| d.offset_hist)
-                } else {
-                    None
-                };
 
                 // Lazily create cross-block match state
                 let params = crate::encoding::compress_params::params_for_level(level_num, None);
@@ -174,17 +164,42 @@ impl<W: io::Write> StreamingEncoder<W> {
                     self.match_state = Some(MatchState::new(&params));
                 }
 
-                zstd_levels::compress_level(
-                    &mut self.state,
-                    last_block,
-                    &data,
-                    level_num,
-                    None,
-                    &mut output,
-                    dict_content,
-                    dict_rep,
-                    self.match_state.as_mut(),
-                );
+                // Pre-split: determine sub-block boundaries based on byte
+                // distribution fingerprints for per-block entropy tables.
+                let boundaries = super::block_splitter::find_split_points(&data, level_num);
+                let num_sub_blocks = boundaries.len() - 1;
+
+                for (sub_idx, window) in boundaries.windows(2).enumerate() {
+                    let sub_start = window[0];
+                    let sub_end = window[1];
+                    let sub_data = &data[sub_start..sub_end];
+                    let is_last_sub_block = sub_idx == num_sub_blocks - 1;
+                    let sub_last_block = last_block && is_last_sub_block;
+
+                    let dict_content = if self.is_first_block && sub_idx == 0 {
+                        self.dictionary.as_ref().map(|d| d.content.as_slice())
+                    } else {
+                        None
+                    };
+                    let dict_rep = if self.is_first_block && sub_idx == 0 {
+                        self.dictionary.as_ref().map(|d| d.offset_hist)
+                    } else {
+                        None
+                    };
+
+                    zstd_levels::compress_level(
+                        &mut self.state,
+                        sub_last_block,
+                        sub_data,
+                        level_num,
+                        None,
+                        &mut output,
+                        dict_content,
+                        dict_rep,
+                        self.match_state.as_mut(),
+                    );
+                }
+
                 self.state.matcher.commit_space(data);
                 self.state.matcher.skip_matching();
             }

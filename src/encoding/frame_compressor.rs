@@ -235,21 +235,46 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                         self.match_state = Some(MatchState::new(&params));
                     }
 
-                    // Dict content/rep are passed on first block for seeding;
-                    // MatchState handles subsequent blocks via its window.
-                    let dict_for_block = if is_first_block { dict_content } else { None };
-                    let rep_for_block = if is_first_block { dict_rep } else { None };
-                    super::levels::zstd_levels::compress_level(
-                        &mut self.state,
-                        last_block,
-                        &uncompressed_data,
-                        level,
-                        None,
-                        output,
-                        dict_for_block,
-                        rep_for_block,
-                        self.match_state.as_mut(),
-                    );
+                    // Pre-split: determine sub-block boundaries based on byte
+                    // distribution fingerprints. This allows per-block entropy
+                    // tables tuned to local statistics, significantly improving
+                    // compression ratio on mixed data.
+                    let boundaries =
+                        super::block_splitter::find_split_points(&uncompressed_data, level);
+                    let num_sub_blocks = boundaries.len() - 1;
+
+                    for (sub_idx, window) in boundaries.windows(2).enumerate() {
+                        let sub_start = window[0];
+                        let sub_end = window[1];
+                        let sub_data = &uncompressed_data[sub_start..sub_end];
+                        let is_last_sub_block = sub_idx == num_sub_blocks - 1;
+                        let sub_last_block = last_block && is_last_sub_block;
+
+                        // Dict content/rep are passed on first block for seeding;
+                        // MatchState handles subsequent blocks via its window.
+                        let dict_for_block = if is_first_block && sub_idx == 0 {
+                            dict_content
+                        } else {
+                            None
+                        };
+                        let rep_for_block = if is_first_block && sub_idx == 0 {
+                            dict_rep
+                        } else {
+                            None
+                        };
+                        super::levels::zstd_levels::compress_level(
+                            &mut self.state,
+                            sub_last_block,
+                            sub_data,
+                            level,
+                            None,
+                            output,
+                            dict_for_block,
+                            rep_for_block,
+                            self.match_state.as_mut(),
+                        );
+                    }
+
                     self.state.matcher.commit_space(uncompressed_data);
                     self.state.matcher.skip_matching();
                 }
