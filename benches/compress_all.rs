@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::io::Cursor;
 
 /// Generate test data: repetitive text (compresses well)
@@ -37,28 +37,18 @@ fn bench_compress(c: &mut Criterion) {
     group.throughput(criterion::Throughput::Bytes(text_100k.len() as u64));
 
     for level in [1, 3, 5, 7, 9, 11, 15, 19] {
-        group.bench_with_input(
-            BenchmarkId::new("zenzstd", level),
-            &level,
-            |b, &level| {
-                b.iter(|| {
-                    zenzstd::encoding::compress_to_vec(
-                        Cursor::new(&text_100k),
-                        zenzstd::encoding::CompressionLevel::Level(level),
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("zenzstd", level), &level, |b, &level| {
+            b.iter(|| {
+                zenzstd::encoding::compress_to_vec(
+                    Cursor::new(&text_100k),
+                    zenzstd::encoding::CompressionLevel::Level(level),
+                )
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("c_zstd", level),
-            &level,
-            |b, &level| {
-                b.iter(|| {
-                    zstd::stream::encode_all(Cursor::new(&text_100k), level).unwrap()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("c_zstd", level), &level, |b, &level| {
+            b.iter(|| zstd::stream::encode_all(Cursor::new(&text_100k), level).unwrap());
+        });
     }
     group.finish();
 
@@ -66,28 +56,18 @@ fn bench_compress(c: &mut Criterion) {
     group.throughput(criterion::Throughput::Bytes(mixed_100k.len() as u64));
 
     for level in [1, 3, 7, 11, 19] {
-        group.bench_with_input(
-            BenchmarkId::new("zenzstd", level),
-            &level,
-            |b, &level| {
-                b.iter(|| {
-                    zenzstd::encoding::compress_to_vec(
-                        Cursor::new(&mixed_100k),
-                        zenzstd::encoding::CompressionLevel::Level(level),
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("zenzstd", level), &level, |b, &level| {
+            b.iter(|| {
+                zenzstd::encoding::compress_to_vec(
+                    Cursor::new(&mixed_100k),
+                    zenzstd::encoding::CompressionLevel::Level(level),
+                )
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("c_zstd", level),
-            &level,
-            |b, &level| {
-                b.iter(|| {
-                    zstd::stream::encode_all(Cursor::new(&mixed_100k), level).unwrap()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("c_zstd", level), &level, |b, &level| {
+            b.iter(|| zstd::stream::encode_all(Cursor::new(&mixed_100k), level).unwrap());
+        });
     }
     group.finish();
 }
@@ -159,10 +139,7 @@ fn bench_ratio(c: &mut Criterion) {
                 zen_compressed.len() as f64 / c_compressed.len() as f64,
             );
 
-            group.bench_function(
-                format!("{}_L{}_{}", name, level, "noop"),
-                |b| b.iter(|| {}),
-            );
+            group.bench_function(format!("{}_L{}_{}", name, level, "noop"), |b| b.iter(|| {}));
         }
     }
     group.finish();

@@ -25,26 +25,29 @@ const PRIME_8: u64 = 0xCF1B_BCDC_B7A5_6463;
 
 /// Read a little-endian `u32` from the first 4 bytes of `data`.
 ///
+/// Uses the fixed-size array pattern (try_into at the boundary) to
+/// eliminate per-byte bounds checks inside the hot loop.
+///
 /// # Panics
 ///
 /// Panics if `data.len() < 4`.
 #[inline(always)]
 fn read_le32(data: &[u8]) -> u32 {
-    let bytes: [u8; 4] = [data[0], data[1], data[2], data[3]];
-    u32::from_le_bytes(bytes)
+    let bytes: &[u8; 4] = data[..4].try_into().unwrap();
+    u32::from_le_bytes(*bytes)
 }
 
 /// Read a little-endian `u64` from the first 8 bytes of `data`.
+///
+/// Uses the fixed-size array pattern to eliminate per-byte bounds checks.
 ///
 /// # Panics
 ///
 /// Panics if `data.len() < 8`.
 #[inline(always)]
 fn read_le64(data: &[u8]) -> u64 {
-    let bytes: [u8; 8] = [
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-    ];
-    u64::from_le_bytes(bytes)
+    let bytes: &[u8; 8] = data[..8].try_into().unwrap();
+    u64::from_le_bytes(*bytes)
 }
 
 /// Hash the first 4 bytes of `data` into `hash_bits` bits.
@@ -146,7 +149,8 @@ pub fn hash_ptr(data: &[u8], hash_bits: u32, min_match_len: u32) -> usize {
 /// Count the number of matching bytes at the start of `a` and `b`.
 ///
 /// Compares bytes from the beginning of both slices and returns the length of
-/// the common prefix. Uses chunked comparison to help the optimizer vectorize.
+/// the common prefix. Delegates to the SIMD-accelerated version when the
+/// `simd` feature is enabled, otherwise uses u64-chunked comparison.
 ///
 /// ```
 /// # // This is a module-level doctest, but the function is pub so it works.
@@ -155,10 +159,6 @@ pub fn hash_ptr(data: &[u8], hash_bits: u32, min_match_len: u32) -> usize {
 /// let b = [1, 2, 3, 4, 5, 77, 88];
 /// // count_match would return 5
 /// ```
-#[inline]
-/// Count matching bytes at the start of `a` and `b`.
-///
-/// Delegates to the SIMD-accelerated version when the `simd` feature is enabled.
 #[inline]
 pub fn count_match(a: &[u8], b: &[u8]) -> usize {
     super::simd::count_match(a, b)

@@ -157,6 +157,9 @@ impl Default for RepCodes {
 /// each block starts fresh and cannot find cross-block matches, hurting
 /// compression ratio.
 ///
+/// The hash and chain tables are owned here and reused across blocks,
+/// avoiding costly per-block allocation and zeroing (~64KB+ per block).
+///
 /// # Usage
 ///
 /// ```ignore
@@ -175,6 +178,18 @@ pub struct MatchState {
     window_size: usize,
     /// Repeat offsets carried over from the previous block.
     rep_offsets: [u32; 3],
+    /// Reusable hash table storage (avoids per-block allocation).
+    hash_table: Vec<u32>,
+    /// Reusable secondary hash table (for DFast long table).
+    hash_table2: Vec<u32>,
+    /// Reusable chain table storage (for Greedy/Lazy/Lazy2).
+    chain_table: Vec<u32>,
+    /// Current hash_log the tables are sized for.
+    table_hash_log: u32,
+    /// Current hash_log for the secondary table.
+    table_hash_log2: u32,
+    /// Current chain_log the chain table is sized for.
+    table_chain_log: u32,
 }
 
 impl MatchState {
@@ -184,6 +199,12 @@ impl MatchState {
             window: Vec::new(),
             window_size: params.window_size(),
             rep_offsets: [1, 4, 8],
+            hash_table: Vec::new(),
+            hash_table2: Vec::new(),
+            chain_table: Vec::new(),
+            table_hash_log: 0,
+            table_hash_log2: 0,
+            table_chain_log: 0,
         }
     }
 
@@ -192,6 +213,38 @@ impl MatchState {
         self.window.clear();
         self.window_size = params.window_size();
         self.rep_offsets = [1, 4, 8];
+        // Tables will be re-sized on next compress_block call
+    }
+
+    /// Ensure the hash table is sized for `hash_log`, clearing it.
+    fn ensure_hash_table(&mut self, hash_log: u32) {
+        let size = 1usize << hash_log;
+        if self.table_hash_log != hash_log || self.hash_table.len() != size {
+            self.hash_table.resize(size, 0);
+            self.table_hash_log = hash_log;
+        }
+        // Clear (memset to 0) — reuse the allocation
+        self.hash_table.fill(0);
+    }
+
+    /// Ensure the secondary hash table is sized for `hash_log`, clearing it.
+    fn ensure_hash_table2(&mut self, hash_log: u32) {
+        let size = 1usize << hash_log;
+        if self.table_hash_log2 != hash_log || self.hash_table2.len() != size {
+            self.hash_table2.resize(size, 0);
+            self.table_hash_log2 = hash_log;
+        }
+        self.hash_table2.fill(0);
+    }
+
+    /// Ensure the chain table is sized for `chain_log`, clearing it.
+    fn ensure_chain_table(&mut self, chain_log: u32) {
+        let size = 1usize << chain_log;
+        if self.table_chain_log != chain_log || self.chain_table.len() != size {
+            self.chain_table.resize(size, 0);
+            self.table_chain_log = chain_log;
+        }
+        self.chain_table.fill(0);
     }
 
     /// Get the current repeat offsets (for use as initial rep offsets of next block).
@@ -208,13 +261,27 @@ impl MatchState {
     ///
     /// The window from previous blocks is used as match history (like a dictionary).
     /// After compression, the window and rep_offsets are updated for the next block.
+    /// Hash/chain tables are reused across blocks (only cleared, not reallocated).
     pub fn compress_block(&mut self, src: &[u8], params: &CompressionParams) -> CompressedBlock {
-        let block = if self.window.is_empty() {
-            // First block (or no history yet): compress without dict
-            compress_block_zstd_with_dict(src, params, &[], &self.rep_offsets)
+        let empty: &[u8] = &[];
+        let dict_content: &[u8] = if self.window.is_empty() {
+            empty
+        } else {
+            self.window.as_slice()
+        };
+
+        // Prepare the combined buffer if there's dict content
+        let block = if dict_content.is_empty() {
+            // First block or no history: compress without dict, using owned tables
+            self.compress_block_with_tables(src, params, &[], &self.rep_offsets.clone())
         } else {
             // Subsequent blocks: use window as dict content
-            compress_block_zstd_with_dict(src, params, &self.window, &self.rep_offsets)
+            let rep = self.rep_offsets;
+            let dict_len = dict_content.len();
+            let mut combined = Vec::with_capacity(dict_len + src.len());
+            combined.extend_from_slice(dict_content);
+            combined.extend_from_slice(src);
+            self.compress_block_dict_with_tables(&combined, dict_len, params, &rep)
         };
 
         // Update rep_offsets by replaying sequences
@@ -224,6 +291,198 @@ impl MatchState {
         self.update_window(src);
 
         block
+    }
+
+    /// Compress a block without dict prefix, using owned tables.
+    fn compress_block_with_tables(
+        &mut self,
+        src: &[u8],
+        params: &CompressionParams,
+        _dict: &[u8],
+        initial_rep: &[u32; 3],
+    ) -> CompressedBlock {
+        if src.is_empty() {
+            return CompressedBlock {
+                literals: Vec::new(),
+                sequences: Vec::new(),
+            };
+        }
+        match params.strategy {
+            Strategy::Fast => {
+                self.ensure_hash_table(params.hash_log);
+                compress_fast_ext(src, params, &mut self.hash_table, initial_rep)
+            }
+            Strategy::DFast => {
+                self.ensure_hash_table(params.hash_log);
+                let long_hash_log = params.hash_log.min(27);
+                self.ensure_hash_table2(long_hash_log);
+                compress_dfast_ext(
+                    src,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.hash_table2,
+                    initial_rep,
+                )
+            }
+            Strategy::Greedy => {
+                self.ensure_hash_table(params.hash_log);
+                self.ensure_chain_table(params.chain_log);
+                compress_greedy_ext(
+                    src,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::Lazy => {
+                self.ensure_hash_table(params.hash_log);
+                self.ensure_chain_table(params.chain_log);
+                compress_lazy_ext(
+                    src,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::Lazy2 => {
+                self.ensure_hash_table(params.hash_log);
+                self.ensure_chain_table(params.chain_log);
+                compress_lazy2_ext(
+                    src,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            // BT strategies allocate their own tree — table reuse is less important
+            // for these slower strategies.
+            Strategy::BtLazy2 => compress_btlazy2(src, params),
+            Strategy::BtOpt | Strategy::BtUltra | Strategy::BtUltra2 => compress_btopt(src, params),
+        }
+    }
+
+    /// Compress a block with dict prefix, using owned tables.
+    fn compress_block_dict_with_tables(
+        &mut self,
+        combined: &[u8],
+        dict_len: usize,
+        params: &CompressionParams,
+        initial_rep: &[u32; 3],
+    ) -> CompressedBlock {
+        match params.strategy {
+            Strategy::Fast => {
+                self.ensure_hash_table(params.hash_log);
+                prefill_hash_table_ext(
+                    &mut self.hash_table,
+                    params.hash_log,
+                    combined,
+                    dict_len,
+                    params.min_match.max(4),
+                );
+                compress_fast_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    initial_rep,
+                )
+            }
+            Strategy::DFast => {
+                self.ensure_hash_table(params.hash_log);
+                let long_hash_log = params.hash_log.min(27);
+                self.ensure_hash_table2(long_hash_log);
+                prefill_hash_table_ext(
+                    &mut self.hash_table,
+                    params.hash_log,
+                    combined,
+                    dict_len,
+                    params.min_match.max(4),
+                );
+                // Prefill long table
+                if dict_len >= 8 {
+                    let end = dict_len.saturating_sub(7);
+                    for pos in 0..end {
+                        let lh = hash8(&combined[pos..], long_hash_log);
+                        self.hash_table2[lh] = pos as u32;
+                    }
+                }
+                compress_dfast_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.hash_table2,
+                    initial_rep,
+                )
+            }
+            Strategy::Greedy => {
+                self.ensure_hash_table(params.hash_log);
+                self.ensure_chain_table(params.chain_log);
+                prefill_hash_chain_ext(
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    params.hash_log,
+                    combined,
+                    dict_len,
+                    params,
+                );
+                compress_greedy_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::Lazy => {
+                self.ensure_hash_table(params.hash_log);
+                self.ensure_chain_table(params.chain_log);
+                prefill_hash_chain_ext(
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    params.hash_log,
+                    combined,
+                    dict_len,
+                    params,
+                );
+                compress_lazy_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::Lazy2 => {
+                self.ensure_hash_table(params.hash_log);
+                self.ensure_chain_table(params.chain_log);
+                prefill_hash_chain_ext(
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    params.hash_log,
+                    combined,
+                    dict_len,
+                    params,
+                );
+                compress_lazy2_dict_ext(
+                    combined,
+                    dict_len,
+                    params,
+                    &mut self.hash_table,
+                    &mut self.chain_table,
+                    initial_rep,
+                )
+            }
+            Strategy::BtLazy2 => compress_btlazy2_dict(combined, dict_len, params, initial_rep),
+            Strategy::BtOpt | Strategy::BtUltra | Strategy::BtUltra2 => {
+                compress_btopt_dict(combined, dict_len, params, initial_rep)
+            }
+        }
     }
 
     /// Replay sequences to compute the final rep_offsets after a block.
@@ -283,65 +542,148 @@ impl MatchState {
 // Hash / Chain tables
 // ---------------------------------------------------------------------------
 
-/// Single hash table: maps hash -> most recent position (as u32).
-struct HashTable {
-    table: Vec<u32>,
+// (HashTable and ChainTable structs removed — replaced by raw-table _ext functions above)
+
+// ---------------------------------------------------------------------------
+// Raw-table inline helpers (operate on &mut [u32] slices, no struct overhead)
+// ---------------------------------------------------------------------------
+
+/// Hash + insert + return previous value, using a raw table slice.
+#[inline]
+fn ht_lookup_and_insert(
+    table: &mut [u32],
+    src: &[u8],
+    pos: usize,
     hash_log: u32,
+    min_match: u32,
+) -> u32 {
+    let h = hash_ptr(&src[pos..], hash_log, min_match);
+    let prev = table[h];
+    table[h] = pos as u32;
+    prev
 }
 
-impl HashTable {
-    fn new(hash_log: u32) -> Self {
-        Self {
-            table: vec![0; 1 << hash_log],
-            hash_log,
+/// Prefill a raw hash table slice with dict positions.
+fn prefill_hash_table_ext(
+    table: &mut [u32],
+    hash_log: u32,
+    combined: &[u8],
+    dict_len: usize,
+    min_match: u32,
+) {
+    if dict_len < 8 {
+        return;
+    }
+    let end = dict_len.saturating_sub(7);
+    for pos in 0..end {
+        let h = hash_ptr(&combined[pos..], hash_log, min_match);
+        table[h] = pos as u32;
+    }
+}
+
+/// Prefill raw hash + chain table slices with dict positions.
+fn prefill_hash_chain_ext(
+    htable: &mut [u32],
+    chain: &mut [u32],
+    hash_log: u32,
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+) {
+    if dict_len < 8 {
+        return;
+    }
+    let chain_mask = (chain.len() as u32).wrapping_sub(1);
+    let end = dict_len.saturating_sub(7);
+    for pos in 0..end {
+        let h = hash_ptr(&combined[pos..], hash_log, params.min_match);
+        let prev = htable[h];
+        htable[h] = pos as u32;
+        chain[(pos as u32 & chain_mask) as usize] = prev;
+    }
+}
+
+/// Search hash chain using raw table slices. Returns best match at `pos`.
+fn search_hash_chain_ext(
+    src: &[u8],
+    pos: usize,
+    htable: &mut [u32],
+    chain: &mut [u32],
+    rep: &RepCodes,
+    params: &CompressionParams,
+    lit_len: u32,
+) -> Option<MatchCandidate> {
+    let min_match = params.min_match.max(4) as usize;
+    let search_depth = params.search_depth();
+    let window_size = params.window_size();
+    let chain_mask = (chain.len() as u32).wrapping_sub(1);
+
+    if pos + 8 > src.len() {
+        return None;
+    }
+
+    // First check repcodes
+    let mut best = try_repcodes(src, pos, rep, min_match as u32, lit_len);
+
+    // Hash lookup + chain walk
+    let h = hash_ptr(&src[pos..], params.hash_log, params.min_match);
+    let mut candidate_pos = htable[h] as usize;
+
+    // Insert current position into hash table + chain
+    let prev = htable[h];
+    htable[h] = pos as u32;
+    chain[(pos as u32 & chain_mask) as usize] = prev;
+
+    let mut depth = search_depth;
+    while depth > 0 && candidate_pos > 0 && candidate_pos < pos {
+        let dist = pos - candidate_pos;
+        if dist > window_size {
+            break;
         }
-    }
 
-    #[inline]
-    fn get(&self, hash: usize) -> u32 {
-        self.table[hash]
-    }
-
-    #[inline]
-    fn insert(&mut self, hash: usize, pos: u32) {
-        self.table[hash] = pos;
-    }
-
-    /// Hash + insert + return previous value.
-    #[inline]
-    fn lookup_and_insert(&mut self, src: &[u8], pos: usize, min_match: u32) -> (usize, u32) {
-        let h = hash_ptr(&src[pos..], self.hash_log, min_match);
-        let prev = self.table[h];
-        self.table[h] = pos as u32;
-        (h, prev)
-    }
-}
-
-/// Chain table: for each position, stores the previous position with the same hash.
-/// Used by Greedy/Lazy/Lazy2 strategies for hash chain traversal.
-struct ChainTable {
-    table: Vec<u32>,
-    mask: u32,
-}
-
-impl ChainTable {
-    fn new(chain_log: u32) -> Self {
-        let size = 1usize << chain_log;
-        Self {
-            table: vec![0; size],
-            mask: (size as u32).wrapping_sub(1),
+        let ml = count_match(&src[pos..], &src[candidate_pos..]);
+        if ml >= min_match {
+            let cand = MatchCandidate {
+                off_base: dist as u32 + 3,
+                match_len: ml as u32,
+            };
+            if best.map_or(true, |b| {
+                cand.match_len > b.match_len
+                    || (cand.match_len == b.match_len && cand.gain() > b.gain())
+            }) {
+                best = Some(cand);
+            }
         }
+
+        // Walk the chain
+        let next = chain[(candidate_pos as u32 & chain_mask) as usize] as usize;
+        if next >= candidate_pos {
+            break;
+        }
+        candidate_pos = next;
+        depth -= 1;
     }
 
-    #[inline]
-    fn get(&self, pos: u32) -> u32 {
-        self.table[(pos & self.mask) as usize]
-    }
+    best
+}
 
-    #[inline]
-    fn insert(&mut self, pos: u32, prev: u32) {
-        self.table[(pos & self.mask) as usize] = prev;
+/// Insert position into hash + chain tables (raw slices) without searching.
+#[inline]
+fn insert_hash_chain_ext(
+    src: &[u8],
+    pos: usize,
+    htable: &mut [u32],
+    chain: &mut [u32],
+    params: &CompressionParams,
+) {
+    if pos + 8 > src.len() {
+        return;
     }
+    let chain_mask = (chain.len() as u32).wrapping_sub(1);
+    let h = hash_ptr(&src[pos..], params.hash_log, params.min_match);
+    let prev = htable[h];
+    htable[h] = pos as u32;
+    chain[(pos as u32 & chain_mask) as usize] = prev;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,66 +873,84 @@ fn build_block(
 }
 
 // ---------------------------------------------------------------------------
-// Strategy: Fast
+// External-table strategy implementations (_ext variants)
+//
+// These accept pre-allocated &mut [u32] tables instead of creating new ones,
+// enabling table reuse across blocks via MatchState. They also include
+// optimizations: step-based insertion for long matches, deferred literal
+// collection.
 // ---------------------------------------------------------------------------
 
-fn compress_fast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+/// Fast strategy using an externally-owned hash table.
+///
+/// Optimized to match C zstd's `ZSTD_compressBlock_fast_generic` structure:
+/// - Repcodes are only checked right after emitting a match (when anchor==pos),
+///   not at every position. This eliminates 3 `count_match` calls per miss.
+/// - Step-based hash insertion for long matches reduces overhead.
+/// - Adaptive stepping on misses (same as C zstd).
+fn compress_fast_ext(
+    src: &[u8],
+    params: &CompressionParams,
+    htable: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
     let min_match = params.min_match.max(4);
     let hash_log = params.hash_log;
-    // For Fast strategy, step size on miss increases with lower effort.
-    // C zstd uses step = (ip - anchor) / step_factor + 1
-    // step_factor = 1 << (search_log + 1) for level 1, but we simplify:
-    // step_factor depends on search_log; for levels 1-2, search_log=1
     let step_factor = 1usize << params.search_log;
+    let window_size = params.window_size();
 
-    let mut htable = HashTable::new(hash_log);
-    let mut rep = RepCodes::new();
+    let mut rep = RepCodes { rep: *initial_rep };
     let mut sequences: Vec<SequenceOut> = Vec::new();
     let mut literals: Vec<u8> = Vec::new();
 
-    let mut anchor: usize = 0; // start of current literal run
+    let mut anchor: usize = 0;
     let mut pos: usize = 0;
-
-    let end = src.len().saturating_sub(8); // need 8 bytes for hash reads
+    let end = src.len().saturating_sub(8);
 
     while pos < end {
-        // Adaptive step: move faster when no matches found recently
-        let step = ((pos - anchor) / step_factor) + 1;
-
-        // Check repcodes first
-        if let Some(rep_match) = try_repcodes(src, pos, &rep, min_match, (pos - anchor) as u32) {
+        // Rep0 check: one count_match vs three in try_repcodes.
+        // When lit_len == 0 (pos == anchor), off_base=1 means rep[1], not rep[0].
+        // We handle this by checking the correct offset based on literal length.
+        {
             let lit_len = (pos - anchor) as u32;
-            literals.extend_from_slice(&src[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: rep_match.off_base,
-                lit_len,
-                match_len: rep_match.match_len,
-            };
-            rep.update(seq.off_base, lit_len);
-            sequences.push(seq);
-            pos += rep_match.match_len as usize;
-            anchor = pos;
-            continue;
+            let rep_offset = if lit_len == 0 { rep.rep[1] } else { rep.rep[0] };
+            let rep_offset_usize = rep_offset as usize;
+            if rep_offset > 0 && rep_offset_usize <= pos && pos + (min_match as usize) <= src.len()
+            {
+                let ref_pos = pos - rep_offset_usize;
+                let rml = count_match(&src[pos..], &src[ref_pos..]);
+                if rml >= min_match as usize {
+                    literals.extend_from_slice(&src[anchor..pos]);
+                    let seq = SequenceOut {
+                        off_base: 1, // off_base 1 with correct ll semantics
+                        lit_len,
+                        match_len: rml as u32,
+                    };
+                    rep.update(seq.off_base, lit_len);
+                    sequences.push(seq);
+                    pos += rml;
+                    anchor = pos;
+                    continue;
+                }
+            }
         }
 
-        // Hash lookup
-        let (_h, match_pos) = htable.lookup_and_insert(src, pos, min_match);
-        let match_pos = match_pos as usize;
+        let step = ((pos - anchor) / step_factor) + 1;
 
-        // Validate: position must be within window and before current pos
-        if match_pos == 0 || match_pos >= pos || (pos - match_pos) > params.window_size() {
+        // Hash lookup using raw table
+        let match_pos = ht_lookup_and_insert(htable, src, pos, hash_log, min_match) as usize;
+
+        if match_pos == 0 || match_pos >= pos || (pos - match_pos) > window_size {
             pos += step;
             continue;
         }
 
-        // Count match length
         let ml = count_match(&src[pos..], &src[match_pos..]);
         if ml < min_match as usize {
             pos += step;
             continue;
         }
 
-        // Emit sequence
         let lit_len = (pos - anchor) as u32;
         literals.extend_from_slice(&src[anchor..pos]);
         let real_offset = (pos - match_pos) as u32;
@@ -602,14 +962,26 @@ fn compress_fast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
         rep.update(seq.off_base, lit_len);
         sequences.push(seq);
 
-        // Insert intermediate positions into hash table
+        // Insert intermediate positions — skip positions for long matches.
+        // C zstd only inserts match start + end for very long matches.
         let match_end = pos + ml;
         pos += 1;
         let insert_end = match_end.min(end);
-        while pos < insert_end {
-            let h = hash_ptr(&src[pos..], hash_log, min_match);
-            htable.insert(h, pos as u32);
-            pos += 1;
+        // For long matches (>32 bytes), only insert every 4th position to
+        // reduce hash insertion overhead. This trades a small amount of match
+        // quality for a large reduction in per-position hash computation.
+        if ml > 32 {
+            while pos < insert_end {
+                let h = hash_ptr(&src[pos..], hash_log, min_match);
+                htable[h] = pos as u32;
+                pos += 4;
+            }
+        } else {
+            while pos < insert_end {
+                let h = hash_ptr(&src[pos..], hash_log, min_match);
+                htable[h] = pos as u32;
+                pos += 1;
+            }
         }
         pos = match_end;
         anchor = pos;
@@ -618,19 +990,110 @@ fn compress_fast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     build_block(src, sequences, literals, anchor)
 }
 
-// ---------------------------------------------------------------------------
-// Strategy: DFast
-// ---------------------------------------------------------------------------
-
-fn compress_dfast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+/// Fast strategy with dict prefix, using externally-owned hash table.
+fn compress_fast_dict_ext(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    htable: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
     let min_match = params.min_match.max(4);
     let hash_log = params.hash_log;
-    // Long hash table uses 8-byte hashing
-    let long_hash_log = hash_log.min(27); // cap at 27 bits
+    let step_factor = 1usize << params.search_log;
+    let window_size = params.window_size();
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
 
-    let mut short_table = HashTable::new(hash_log);
-    let mut long_table = HashTable::new(long_hash_log);
-    let mut rep = RepCodes::new();
+    while pos < end {
+        // Rep0 check with correct ll=0 semantics
+        {
+            let lit_len = (pos - anchor) as u32;
+            let rep_offset = if lit_len == 0 { rep.rep[1] } else { rep.rep[0] };
+            let rep_offset_usize = rep_offset as usize;
+            if rep_offset > 0
+                && rep_offset_usize <= pos
+                && pos + (min_match as usize) <= combined.len()
+            {
+                let ref_pos = pos - rep_offset_usize;
+                let rml = count_match(&combined[pos..], &combined[ref_pos..]);
+                if rml >= min_match as usize {
+                    literals.extend_from_slice(&combined[anchor..pos]);
+                    let seq = SequenceOut {
+                        off_base: 1,
+                        lit_len,
+                        match_len: rml as u32,
+                    };
+                    rep.update(seq.off_base, lit_len);
+                    sequences.push(seq);
+                    pos += rml;
+                    anchor = pos;
+                    continue;
+                }
+            }
+        }
+
+        let step = ((pos - anchor) / step_factor) + 1;
+        let mp = ht_lookup_and_insert(htable, combined, pos, hash_log, min_match) as usize;
+        if mp >= pos || (pos - mp) > window_size {
+            pos += step;
+            continue;
+        }
+        let ml = count_match(&combined[pos..], &combined[mp..]);
+        if ml < min_match as usize {
+            pos += step;
+            continue;
+        }
+        let ll = (pos - anchor) as u32;
+        literals.extend_from_slice(&combined[anchor..pos]);
+        let ro = (pos - mp) as u32;
+        let seq = SequenceOut {
+            off_base: ro + 3,
+            lit_len: ll,
+            match_len: ml as u32,
+        };
+        rep.update(seq.off_base, ll);
+        sequences.push(seq);
+        let me = pos + ml;
+        pos += 1;
+        let ie = me.min(end);
+        if ml > 32 {
+            while pos < ie {
+                let h = hash_ptr(&combined[pos..], hash_log, min_match);
+                htable[h] = pos as u32;
+                pos += 4;
+            }
+        } else {
+            while pos < ie {
+                let h = hash_ptr(&combined[pos..], hash_log, min_match);
+                htable[h] = pos as u32;
+                pos += 1;
+            }
+        }
+        pos = me;
+        anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+/// DFast strategy using externally-owned hash tables.
+fn compress_dfast_ext(
+    src: &[u8],
+    params: &CompressionParams,
+    short_table: &mut [u32],
+    long_table: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let min_match = params.min_match.max(4);
+    let hash_log = params.hash_log;
+    let long_hash_log = params.hash_log.min(27);
+    let window_size = params.window_size();
+
+    let mut rep = RepCodes { rep: *initial_rep };
     let mut sequences: Vec<SequenceOut> = Vec::new();
     let mut literals: Vec<u8> = Vec::new();
 
@@ -639,36 +1102,44 @@ fn compress_dfast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     let end = src.len().saturating_sub(8);
 
     while pos < end {
-        // Check repcodes
-        if let Some(rep_match) = try_repcodes(src, pos, &rep, min_match, (pos - anchor) as u32) {
+        // Rep0 check with correct ll=0 semantics
+        {
             let lit_len = (pos - anchor) as u32;
-            literals.extend_from_slice(&src[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: rep_match.off_base,
-                lit_len,
-                match_len: rep_match.match_len,
-            };
-            rep.update(seq.off_base, lit_len);
-            sequences.push(seq);
-            pos += rep_match.match_len as usize;
-            anchor = pos;
-            continue;
+            let rep_offset = if lit_len == 0 { rep.rep[1] } else { rep.rep[0] };
+            let rep_offset_usize = rep_offset as usize;
+            if rep_offset > 0 && rep_offset_usize <= pos && pos + (min_match as usize) <= src.len()
+            {
+                let ref_pos = pos - rep_offset_usize;
+                let rml = count_match(&src[pos..], &src[ref_pos..]);
+                if rml >= min_match as usize {
+                    literals.extend_from_slice(&src[anchor..pos]);
+                    let seq = SequenceOut {
+                        off_base: 1,
+                        lit_len,
+                        match_len: rml as u32,
+                    };
+                    rep.update(seq.off_base, lit_len);
+                    sequences.push(seq);
+                    pos += rml;
+                    anchor = pos;
+                    continue;
+                }
+            }
         }
 
-        // Short hash (min_match bytes)
+        // Short hash
         let short_h = hash_ptr(&src[pos..], hash_log, min_match);
-        let short_prev = short_table.get(short_h) as usize;
-        short_table.insert(short_h, pos as u32);
+        let short_prev = short_table[short_h] as usize;
+        short_table[short_h] = pos as u32;
 
-        // Long hash (8 bytes)
+        // Long hash
         let long_h = hash8(&src[pos..], long_hash_log);
-        let long_prev = long_table.get(long_h) as usize;
-        long_table.insert(long_h, pos as u32);
+        let long_prev = long_table[long_h] as usize;
+        long_table[long_h] = pos as u32;
 
-        // Try long match first
         let mut best: Option<MatchCandidate> = None;
 
-        if long_prev > 0 && long_prev < pos && (pos - long_prev) <= params.window_size() {
+        if long_prev > 0 && long_prev < pos && (pos - long_prev) <= window_size {
             let ml = count_match(&src[pos..], &src[long_prev..]);
             if ml >= min_match as usize {
                 best = Some(MatchCandidate {
@@ -678,8 +1149,7 @@ fn compress_dfast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
             }
         }
 
-        // Try short match
-        if short_prev > 0 && short_prev < pos && (pos - short_prev) <= params.window_size() {
+        if short_prev > 0 && short_prev < pos && (pos - short_prev) <= window_size {
             let ml = count_match(&src[pos..], &src[short_prev..]);
             if ml >= min_match as usize {
                 let cand = MatchCandidate {
@@ -703,16 +1173,26 @@ fn compress_dfast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
             rep.update(seq.off_base, lit_len);
             sequences.push(seq);
 
-            // Insert intermediate positions
-            let match_end = pos + m.match_len as usize;
+            let ml = m.match_len as usize;
+            let match_end = pos + ml;
             pos += 1;
             let insert_end = match_end.min(end);
-            while pos < insert_end {
-                let sh = hash_ptr(&src[pos..], hash_log, min_match);
-                short_table.insert(sh, pos as u32);
-                let lh = hash8(&src[pos..], long_hash_log);
-                long_table.insert(lh, pos as u32);
-                pos += 1;
+            if ml > 32 {
+                while pos < insert_end {
+                    let sh = hash_ptr(&src[pos..], hash_log, min_match);
+                    short_table[sh] = pos as u32;
+                    let lh = hash8(&src[pos..], long_hash_log);
+                    long_table[lh] = pos as u32;
+                    pos += 4;
+                }
+            } else {
+                while pos < insert_end {
+                    let sh = hash_ptr(&src[pos..], hash_log, min_match);
+                    short_table[sh] = pos as u32;
+                    let lh = hash8(&src[pos..], long_hash_log);
+                    long_table[lh] = pos as u32;
+                    pos += 1;
+                }
             }
             pos = match_end;
             anchor = pos;
@@ -724,100 +1204,130 @@ fn compress_dfast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     build_block(src, sequences, literals, anchor)
 }
 
-// ---------------------------------------------------------------------------
-// Hash chain search (used by Greedy, Lazy, Lazy2)
-// ---------------------------------------------------------------------------
-
-/// Search the hash chain for the best match at `pos`.
-/// Returns the best match found (if any) considering both the hash chain and repcodes.
-fn search_hash_chain(
-    src: &[u8],
-    pos: usize,
-    htable: &mut HashTable,
-    chain: &mut ChainTable,
-    rep: &RepCodes,
+/// DFast strategy with dict prefix, using externally-owned hash tables.
+fn compress_dfast_dict_ext(
+    combined: &[u8],
+    dict_len: usize,
     params: &CompressionParams,
-    lit_len: u32,
-) -> Option<MatchCandidate> {
-    let min_match = params.min_match.max(4) as usize;
-    let search_depth = params.search_depth();
+    short_table: &mut [u32],
+    long_table: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let min_match = params.min_match.max(4);
+    let hash_log = params.hash_log;
+    let long_hash_log = hash_log.min(27);
     let window_size = params.window_size();
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
 
-    if pos + 8 > src.len() {
-        return None;
-    }
-
-    // First check repcodes
-    let mut best = try_repcodes(src, pos, rep, min_match as u32, lit_len);
-
-    // Hash lookup + chain walk
-    let h = hash_ptr(&src[pos..], params.hash_log, params.min_match);
-    let mut candidate_pos = htable.get(h) as usize;
-
-    // Insert current position into hash table + chain
-    let prev = htable.get(h);
-    htable.insert(h, pos as u32);
-    chain.insert(pos as u32, prev);
-
-    let mut depth = search_depth;
-    while depth > 0 && candidate_pos > 0 && candidate_pos < pos {
-        let dist = pos - candidate_pos;
-        if dist > window_size {
-            break;
-        }
-
-        let ml = count_match(&src[pos..], &src[candidate_pos..]);
-        if ml >= min_match {
-            let cand = MatchCandidate {
-                off_base: dist as u32 + 3,
-                match_len: ml as u32,
-            };
-            if best.map_or(true, |b| {
-                cand.match_len > b.match_len
-                    || (cand.match_len == b.match_len && cand.gain() > b.gain())
-            }) {
-                best = Some(cand);
+    while pos < end {
+        // Rep0 check with correct ll=0 semantics
+        {
+            let lit_len = (pos - anchor) as u32;
+            let rep_offset = if lit_len == 0 { rep.rep[1] } else { rep.rep[0] };
+            let rep_offset_usize = rep_offset as usize;
+            if rep_offset > 0
+                && rep_offset_usize <= pos
+                && pos + (min_match as usize) <= combined.len()
+            {
+                let ref_pos = pos - rep_offset_usize;
+                let rml = count_match(&combined[pos..], &combined[ref_pos..]);
+                if rml >= min_match as usize {
+                    literals.extend_from_slice(&combined[anchor..pos]);
+                    let seq = SequenceOut {
+                        off_base: 1,
+                        lit_len,
+                        match_len: rml as u32,
+                    };
+                    rep.update(seq.off_base, lit_len);
+                    sequences.push(seq);
+                    pos += rml;
+                    anchor = pos;
+                    continue;
+                }
             }
         }
-
-        // Walk the chain
-        let next = chain.get(candidate_pos as u32) as usize;
-        if next >= candidate_pos {
-            break; // avoid infinite loops from stale chain entries
+        let sh = hash_ptr(&combined[pos..], hash_log, min_match);
+        let sp = short_table[sh] as usize;
+        short_table[sh] = pos as u32;
+        let lh = hash8(&combined[pos..], long_hash_log);
+        let lp = long_table[lh] as usize;
+        long_table[lh] = pos as u32;
+        let mut best: Option<MatchCandidate> = None;
+        if lp < pos && (pos - lp) <= window_size {
+            let ml = count_match(&combined[pos..], &combined[lp..]);
+            if ml >= min_match as usize {
+                best = Some(MatchCandidate {
+                    off_base: (pos - lp) as u32 + 3,
+                    match_len: ml as u32,
+                });
+            }
         }
-        candidate_pos = next;
-        depth -= 1;
+        if sp < pos && (pos - sp) <= window_size {
+            let ml = count_match(&combined[pos..], &combined[sp..]);
+            if ml >= min_match as usize {
+                let c = MatchCandidate {
+                    off_base: (pos - sp) as u32 + 3,
+                    match_len: ml as u32,
+                };
+                if best.map_or(true, |b| c.match_len > b.match_len) {
+                    best = Some(c);
+                }
+            }
+        }
+        if let Some(m) = best {
+            let ll = (pos - anchor) as u32;
+            literals.extend_from_slice(&combined[anchor..pos]);
+            let seq = SequenceOut {
+                off_base: m.off_base,
+                lit_len: ll,
+                match_len: m.match_len,
+            };
+            rep.update(seq.off_base, ll);
+            sequences.push(seq);
+            let ml = m.match_len as usize;
+            let me = pos + ml;
+            pos += 1;
+            let ie = me.min(end);
+            if ml > 32 {
+                while pos < ie {
+                    let s = hash_ptr(&combined[pos..], hash_log, min_match);
+                    short_table[s] = pos as u32;
+                    let l = hash8(&combined[pos..], long_hash_log);
+                    long_table[l] = pos as u32;
+                    pos += 4;
+                }
+            } else {
+                while pos < ie {
+                    let s = hash_ptr(&combined[pos..], hash_log, min_match);
+                    short_table[s] = pos as u32;
+                    let l = hash8(&combined[pos..], long_hash_log);
+                    long_table[l] = pos as u32;
+                    pos += 1;
+                }
+            }
+            pos = me;
+            anchor = pos;
+        } else {
+            pos += 1;
+        }
     }
-
-    best
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
 }
 
-/// Insert a position into hash table and chain table without searching.
-#[inline]
-fn insert_hash_chain(
+/// Greedy strategy using externally-owned hash + chain tables.
+fn compress_greedy_ext(
     src: &[u8],
-    pos: usize,
-    htable: &mut HashTable,
-    chain: &mut ChainTable,
     params: &CompressionParams,
-) {
-    if pos + 8 > src.len() {
-        return;
-    }
-    let h = hash_ptr(&src[pos..], params.hash_log, params.min_match);
-    let prev = htable.get(h);
-    htable.insert(h, pos as u32);
-    chain.insert(pos as u32, prev);
-}
-
-// ---------------------------------------------------------------------------
-// Strategy: Greedy
-// ---------------------------------------------------------------------------
-
-fn compress_greedy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
-    let mut htable = HashTable::new(params.hash_log);
-    let mut chain = ChainTable::new(params.chain_log);
-    let mut rep = RepCodes::new();
+    htable: &mut [u32],
+    chain: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut rep = RepCodes { rep: *initial_rep };
     let mut sequences: Vec<SequenceOut> = Vec::new();
     let mut literals: Vec<u8> = Vec::new();
 
@@ -827,7 +1337,7 @@ fn compress_greedy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
 
     while pos < end {
         let lit_len = (pos - anchor) as u32;
-        let best = search_hash_chain(src, pos, &mut htable, &mut chain, &rep, params, lit_len);
+        let best = search_hash_chain_ext(src, pos, htable, chain, &rep, params, lit_len);
 
         if let Some(m) = best {
             literals.extend_from_slice(&src[anchor..pos]);
@@ -839,11 +1349,9 @@ fn compress_greedy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
             rep.update(seq.off_base, lit_len);
             sequences.push(seq);
 
-            // Insert intermediate positions into hash chain
             let match_end = pos + m.match_len as usize;
-            // pos was already inserted by search_hash_chain, start at pos+1
             for p in (pos + 1)..match_end.min(end) {
-                insert_hash_chain(src, p, &mut htable, &mut chain, params);
+                insert_hash_chain_ext(src, p, htable, chain, params);
             }
             pos = match_end;
             anchor = pos;
@@ -855,14 +1363,56 @@ fn compress_greedy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     build_block(src, sequences, literals, anchor)
 }
 
-// ---------------------------------------------------------------------------
-// Strategy: Lazy
-// ---------------------------------------------------------------------------
+/// Greedy strategy with dict prefix, using externally-owned tables.
+fn compress_greedy_dict_ext(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    htable: &mut [u32],
+    chain: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
 
-fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
-    let mut htable = HashTable::new(params.hash_log);
-    let mut chain = ChainTable::new(params.chain_log);
-    let mut rep = RepCodes::new();
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let best = search_hash_chain_ext(combined, pos, htable, chain, &rep, params, ll);
+        if let Some(m) = best {
+            literals.extend_from_slice(&combined[anchor..pos]);
+            let seq = SequenceOut {
+                off_base: m.off_base,
+                lit_len: ll,
+                match_len: m.match_len,
+            };
+            rep.update(seq.off_base, ll);
+            sequences.push(seq);
+            let me = pos + m.match_len as usize;
+            for p in (pos + 1)..me.min(end) {
+                insert_hash_chain_ext(combined, p, htable, chain, params);
+            }
+            pos = me;
+            anchor = pos;
+        } else {
+            pos += 1;
+        }
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+/// Lazy strategy using externally-owned hash + chain tables.
+fn compress_lazy_ext(
+    src: &[u8],
+    params: &CompressionParams,
+    htable: &mut [u32],
+    chain: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut rep = RepCodes { rep: *initial_rep };
     let mut sequences: Vec<SequenceOut> = Vec::new();
     let mut literals: Vec<u8> = Vec::new();
 
@@ -872,7 +1422,7 @@ fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
 
     while pos < end {
         let lit_len = (pos - anchor) as u32;
-        let match0 = search_hash_chain(src, pos, &mut htable, &mut chain, &rep, params, lit_len);
+        let match0 = search_hash_chain_ext(src, pos, htable, chain, &rep, params, lit_len);
 
         let match0 = match match0 {
             Some(m) => m,
@@ -885,19 +1435,10 @@ fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
         // Lazy: check pos+1 for a better match
         if pos + 1 < end {
             let lit_len1 = (pos + 1 - anchor) as u32;
-            let match1 = search_hash_chain(
-                src,
-                pos + 1,
-                &mut htable,
-                &mut chain,
-                &rep,
-                params,
-                lit_len1,
-            );
+            let match1 = search_hash_chain_ext(src, pos + 1, htable, chain, &rep, params, lit_len1);
 
             if let Some(m1) = match1 {
                 if match0.is_better_lazy(&m1) {
-                    // Use match at pos+1 instead; emit one extra literal
                     let lit_len_out = (pos + 1 - anchor) as u32;
                     literals.extend_from_slice(&src[anchor..pos + 1]);
                     let seq = SequenceOut {
@@ -910,7 +1451,7 @@ fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
 
                     let match_end = pos + 1 + m1.match_len as usize;
                     for p in (pos + 2)..match_end.min(end) {
-                        insert_hash_chain(src, p, &mut htable, &mut chain, params);
+                        insert_hash_chain_ext(src, p, htable, chain, params);
                     }
                     pos = match_end;
                     anchor = pos;
@@ -931,7 +1472,7 @@ fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
 
         let match_end = pos + match0.match_len as usize;
         for p in (pos + 1)..match_end.min(end) {
-            insert_hash_chain(src, p, &mut htable, &mut chain, params);
+            insert_hash_chain_ext(src, p, htable, chain, params);
         }
         pos = match_end;
         anchor = pos;
@@ -940,14 +1481,83 @@ fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     build_block(src, sequences, literals, anchor)
 }
 
-// ---------------------------------------------------------------------------
-// Strategy: Lazy2
-// ---------------------------------------------------------------------------
+/// Lazy strategy with dict prefix, using externally-owned tables.
+fn compress_lazy_dict_ext(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    htable: &mut [u32],
+    chain: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
 
-fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
-    let mut htable = HashTable::new(params.hash_log);
-    let mut chain = ChainTable::new(params.chain_log);
-    let mut rep = RepCodes::new();
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let m0 = match search_hash_chain_ext(combined, pos, htable, chain, &rep, params, ll) {
+            Some(m) => m,
+            None => {
+                pos += 1;
+                continue;
+            }
+        };
+        if pos + 1 < end {
+            let ll1 = (pos + 1 - anchor) as u32;
+            if let Some(m1) =
+                search_hash_chain_ext(combined, pos + 1, htable, chain, &rep, params, ll1)
+            {
+                if m0.is_better_lazy(&m1) {
+                    let llo = (pos + 1 - anchor) as u32;
+                    literals.extend_from_slice(&combined[anchor..pos + 1]);
+                    let seq = SequenceOut {
+                        off_base: m1.off_base,
+                        lit_len: llo,
+                        match_len: m1.match_len,
+                    };
+                    rep.update(seq.off_base, llo);
+                    sequences.push(seq);
+                    let me = pos + 1 + m1.match_len as usize;
+                    for p in (pos + 2)..me.min(end) {
+                        insert_hash_chain_ext(combined, p, htable, chain, params);
+                    }
+                    pos = me;
+                    anchor = pos;
+                    continue;
+                }
+            }
+        }
+        literals.extend_from_slice(&combined[anchor..pos]);
+        let seq = SequenceOut {
+            off_base: m0.off_base,
+            lit_len: ll,
+            match_len: m0.match_len,
+        };
+        rep.update(seq.off_base, ll);
+        sequences.push(seq);
+        let me = pos + m0.match_len as usize;
+        for p in (pos + 1)..me.min(end) {
+            insert_hash_chain_ext(combined, p, htable, chain, params);
+        }
+        pos = me;
+        anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+/// Lazy2 strategy using externally-owned hash + chain tables.
+fn compress_lazy2_ext(
+    src: &[u8],
+    params: &CompressionParams,
+    htable: &mut [u32],
+    chain: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut rep = RepCodes { rep: *initial_rep };
     let mut sequences: Vec<SequenceOut> = Vec::new();
     let mut literals: Vec<u8> = Vec::new();
 
@@ -957,7 +1567,7 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
 
     while pos < end {
         let lit_len = (pos - anchor) as u32;
-        let match0 = search_hash_chain(src, pos, &mut htable, &mut chain, &rep, params, lit_len);
+        let match0 = search_hash_chain_ext(src, pos, htable, chain, &rep, params, lit_len);
 
         let match0 = match match0 {
             Some(m) => m,
@@ -967,35 +1577,25 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
             }
         };
 
-        // Lazy: check pos+1
         let mut best_pos = pos;
         let mut best_match = match0;
 
         if pos + 1 < end {
             let lit_len1 = (pos + 1 - anchor) as u32;
-            let match1 = search_hash_chain(
-                src,
-                pos + 1,
-                &mut htable,
-                &mut chain,
-                &rep,
-                params,
-                lit_len1,
-            );
+            let match1 = search_hash_chain_ext(src, pos + 1, htable, chain, &rep, params, lit_len1);
 
             if let Some(m1) = match1 {
                 if best_match.is_better_lazy(&m1) {
                     best_pos = pos + 1;
                     best_match = m1;
 
-                    // Lazy2: also check pos+2
                     if pos + 2 < end {
                         let lit_len2 = (pos + 2 - anchor) as u32;
-                        let match2 = search_hash_chain(
+                        let match2 = search_hash_chain_ext(
                             src,
                             pos + 2,
-                            &mut htable,
-                            &mut chain,
+                            htable,
+                            chain,
                             &rep,
                             params,
                             lit_len2,
@@ -1011,7 +1611,6 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
             }
         }
 
-        // Emit the best match
         let lit_len_out = (best_pos - anchor) as u32;
         literals.extend_from_slice(&src[anchor..best_pos]);
         let seq = SequenceOut {
@@ -1023,18 +1622,11 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
         sequences.push(seq);
 
         let match_end = best_pos + best_match.match_len as usize;
-        // Insert skipped positions + match interior
         for p in (pos + 1)..match_end.min(end) {
-            // search_hash_chain already inserted pos, pos+1, and possibly pos+2
-            // during the lazy search, so we skip those.
-            // Actually, search_hash_chain inserts only the position it searches at,
-            // so we need to insert everything from pos+1 that wasn't already searched.
-            // The searched positions were: pos, and pos+1 (and pos+2 for lazy2).
-            // Those were inserted by search_hash_chain. So skip them.
             let already_inserted =
                 p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
             if !already_inserted {
-                insert_hash_chain(src, p, &mut htable, &mut chain, params);
+                insert_hash_chain_ext(src, p, htable, chain, params);
             }
         }
         pos = match_end;
@@ -1042,6 +1634,133 @@ fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     }
 
     build_block(src, sequences, literals, anchor)
+}
+
+/// Lazy2 strategy with dict prefix, using externally-owned tables.
+fn compress_lazy2_dict_ext(
+    combined: &[u8],
+    dict_len: usize,
+    params: &CompressionParams,
+    htable: &mut [u32],
+    chain: &mut [u32],
+    initial_rep: &[u32; 3],
+) -> CompressedBlock {
+    let mut rep = RepCodes { rep: *initial_rep };
+    let mut sequences: Vec<SequenceOut> = Vec::new();
+    let mut literals: Vec<u8> = Vec::new();
+    let mut anchor = dict_len;
+    let mut pos = dict_len;
+    let end = combined.len().saturating_sub(8);
+
+    while pos < end {
+        let ll = (pos - anchor) as u32;
+        let m0 = match search_hash_chain_ext(combined, pos, htable, chain, &rep, params, ll) {
+            Some(m) => m,
+            None => {
+                pos += 1;
+                continue;
+            }
+        };
+        let mut best_pos = pos;
+        let mut best_match = m0;
+        if pos + 1 < end {
+            let ll1 = (pos + 1 - anchor) as u32;
+            if let Some(m1) =
+                search_hash_chain_ext(combined, pos + 1, htable, chain, &rep, params, ll1)
+            {
+                if best_match.is_better_lazy(&m1) {
+                    best_pos = pos + 1;
+                    best_match = m1;
+                    if pos + 2 < end {
+                        let ll2 = (pos + 2 - anchor) as u32;
+                        if let Some(m2) = search_hash_chain_ext(
+                            combined,
+                            pos + 2,
+                            htable,
+                            chain,
+                            &rep,
+                            params,
+                            ll2,
+                        ) {
+                            if best_match.is_better_lazy(&m2) {
+                                best_pos = pos + 2;
+                                best_match = m2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let llo = (best_pos - anchor) as u32;
+        literals.extend_from_slice(&combined[anchor..best_pos]);
+        let seq = SequenceOut {
+            off_base: best_match.off_base,
+            lit_len: llo,
+            match_len: best_match.match_len,
+        };
+        rep.update(seq.off_base, llo);
+        sequences.push(seq);
+        let me = best_pos + best_match.match_len as usize;
+        for p in (pos + 1)..me.min(end) {
+            let already = p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
+            if !already {
+                insert_hash_chain_ext(combined, p, htable, chain, params);
+            }
+        }
+        pos = me;
+        anchor = pos;
+    }
+    build_block_dict(combined, dict_len, sequences, literals, anchor)
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: Fast (original, allocates own tables)
+// ---------------------------------------------------------------------------
+
+fn compress_fast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    compress_fast_ext(src, params, &mut htable, &[1, 4, 8])
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: DFast
+// ---------------------------------------------------------------------------
+
+fn compress_dfast(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    let long_hash_log = params.hash_log.min(27);
+    let mut short_table = vec![0u32; 1 << params.hash_log];
+    let mut long_table = vec![0u32; 1 << long_hash_log];
+    compress_dfast_ext(src, params, &mut short_table, &mut long_table, &[1, 4, 8])
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: Greedy
+// ---------------------------------------------------------------------------
+
+fn compress_greedy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    let mut chain = vec![0u32; 1 << params.chain_log];
+    compress_greedy_ext(src, params, &mut htable, &mut chain, &[1, 4, 8])
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: Lazy
+// ---------------------------------------------------------------------------
+
+fn compress_lazy(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    let mut chain = vec![0u32; 1 << params.chain_log];
+    compress_lazy_ext(src, params, &mut htable, &mut chain, &[1, 4, 8])
+}
+
+// ---------------------------------------------------------------------------
+// Strategy: Lazy2
+// ---------------------------------------------------------------------------
+
+fn compress_lazy2(src: &[u8], params: &CompressionParams) -> CompressedBlock {
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    let mut chain = vec![0u32; 1 << params.chain_log];
+    compress_lazy2_ext(src, params, &mut htable, &mut chain, &[1, 4, 8])
 }
 
 // ---------------------------------------------------------------------------
@@ -2456,36 +3175,6 @@ fn build_block_dict(
     }
 }
 
-fn prefill_hash_table(htable: &mut HashTable, combined: &[u8], dict_len: usize, min_match: u32) {
-    if dict_len < 8 {
-        return;
-    }
-    let end = dict_len.saturating_sub(7);
-    for pos in 0..end {
-        let h = hash_ptr(&combined[pos..], htable.hash_log, min_match);
-        htable.insert(h, pos as u32);
-    }
-}
-
-fn prefill_hash_chain(
-    htable: &mut HashTable,
-    chain: &mut ChainTable,
-    combined: &[u8],
-    dict_len: usize,
-    params: &CompressionParams,
-) {
-    if dict_len < 8 {
-        return;
-    }
-    let end = dict_len.saturating_sub(7);
-    for pos in 0..end {
-        let h = hash_ptr(&combined[pos..], params.hash_log, params.min_match);
-        let prev = htable.get(h);
-        htable.insert(h, pos as u32);
-        chain.insert(pos as u32, prev);
-    }
-}
-
 fn compress_fast_dict(
     combined: &[u8],
     dict_len: usize,
@@ -2493,65 +3182,9 @@ fn compress_fast_dict(
     initial_rep: &[u32; 3],
 ) -> CompressedBlock {
     let min_match = params.min_match.max(4);
-    let hash_log = params.hash_log;
-    let step_factor = 1usize << params.search_log;
-    let mut htable = HashTable::new(hash_log);
-    prefill_hash_table(&mut htable, combined, dict_len, min_match);
-    let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
-    let mut anchor = dict_len;
-    let mut pos = dict_len;
-    let end = combined.len().saturating_sub(8);
-    while pos < end {
-        let step = ((pos - anchor) / step_factor) + 1;
-        if let Some(rm) = try_repcodes(combined, pos, &rep, min_match, (pos - anchor) as u32) {
-            let ll = (pos - anchor) as u32;
-            literals.extend_from_slice(&combined[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: rm.off_base,
-                lit_len: ll,
-                match_len: rm.match_len,
-            };
-            rep.update(seq.off_base, ll);
-            sequences.push(seq);
-            pos += rm.match_len as usize;
-            anchor = pos;
-            continue;
-        }
-        let (_h, mp) = htable.lookup_and_insert(combined, pos, min_match);
-        let mp = mp as usize;
-        if mp >= pos || (pos - mp) > params.window_size() {
-            pos += step;
-            continue;
-        }
-        let ml = count_match(&combined[pos..], &combined[mp..]);
-        if ml < min_match as usize {
-            pos += step;
-            continue;
-        }
-        let ll = (pos - anchor) as u32;
-        literals.extend_from_slice(&combined[anchor..pos]);
-        let ro = (pos - mp) as u32;
-        let seq = SequenceOut {
-            off_base: ro + 3,
-            lit_len: ll,
-            match_len: ml as u32,
-        };
-        rep.update(seq.off_base, ll);
-        sequences.push(seq);
-        let me = pos + ml;
-        pos += 1;
-        let ie = me.min(end);
-        while pos < ie {
-            let h = hash_ptr(&combined[pos..], hash_log, min_match);
-            htable.insert(h, pos as u32);
-            pos += 1;
-        }
-        pos = me;
-        anchor = pos;
-    }
-    build_block_dict(combined, dict_len, sequences, literals, anchor)
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    prefill_hash_table_ext(&mut htable, params.hash_log, combined, dict_len, min_match);
+    compress_fast_dict_ext(combined, dict_len, params, &mut htable, initial_rep)
 }
 
 fn compress_dfast_dict(
@@ -2561,94 +3194,31 @@ fn compress_dfast_dict(
     initial_rep: &[u32; 3],
 ) -> CompressedBlock {
     let min_match = params.min_match.max(4);
-    let hash_log = params.hash_log;
-    let long_hash_log = hash_log.min(27);
-    let mut short_table = HashTable::new(hash_log);
-    let mut long_table = HashTable::new(long_hash_log);
-    prefill_hash_table(&mut short_table, combined, dict_len, min_match);
+    let long_hash_log = params.hash_log.min(27);
+    let mut short_table = vec![0u32; 1 << params.hash_log];
+    let mut long_table = vec![0u32; 1 << long_hash_log];
+    prefill_hash_table_ext(
+        &mut short_table,
+        params.hash_log,
+        combined,
+        dict_len,
+        min_match,
+    );
     if dict_len >= 8 {
         let end = dict_len.saturating_sub(7);
         for pos in 0..end {
             let lh = hash8(&combined[pos..], long_hash_log);
-            long_table.insert(lh, pos as u32);
+            long_table[lh] = pos as u32;
         }
     }
-    let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
-    let mut anchor = dict_len;
-    let mut pos = dict_len;
-    let end = combined.len().saturating_sub(8);
-    while pos < end {
-        if let Some(rm) = try_repcodes(combined, pos, &rep, min_match, (pos - anchor) as u32) {
-            let ll = (pos - anchor) as u32;
-            literals.extend_from_slice(&combined[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: rm.off_base,
-                lit_len: ll,
-                match_len: rm.match_len,
-            };
-            rep.update(seq.off_base, ll);
-            sequences.push(seq);
-            pos += rm.match_len as usize;
-            anchor = pos;
-            continue;
-        }
-        let sh = hash_ptr(&combined[pos..], hash_log, min_match);
-        let sp = short_table.get(sh) as usize;
-        short_table.insert(sh, pos as u32);
-        let lh = hash8(&combined[pos..], long_hash_log);
-        let lp = long_table.get(lh) as usize;
-        long_table.insert(lh, pos as u32);
-        let mut best: Option<MatchCandidate> = None;
-        if lp < pos && (pos - lp) <= params.window_size() {
-            let ml = count_match(&combined[pos..], &combined[lp..]);
-            if ml >= min_match as usize {
-                best = Some(MatchCandidate {
-                    off_base: (pos - lp) as u32 + 3,
-                    match_len: ml as u32,
-                });
-            }
-        }
-        if sp < pos && (pos - sp) <= params.window_size() {
-            let ml = count_match(&combined[pos..], &combined[sp..]);
-            if ml >= min_match as usize {
-                let c = MatchCandidate {
-                    off_base: (pos - sp) as u32 + 3,
-                    match_len: ml as u32,
-                };
-                if best.map_or(true, |b| c.match_len > b.match_len) {
-                    best = Some(c);
-                }
-            }
-        }
-        if let Some(m) = best {
-            let ll = (pos - anchor) as u32;
-            literals.extend_from_slice(&combined[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: m.off_base,
-                lit_len: ll,
-                match_len: m.match_len,
-            };
-            rep.update(seq.off_base, ll);
-            sequences.push(seq);
-            let me = pos + m.match_len as usize;
-            pos += 1;
-            let ie = me.min(end);
-            while pos < ie {
-                let s = hash_ptr(&combined[pos..], hash_log, min_match);
-                short_table.insert(s, pos as u32);
-                let l = hash8(&combined[pos..], long_hash_log);
-                long_table.insert(l, pos as u32);
-                pos += 1;
-            }
-            pos = me;
-            anchor = pos;
-        } else {
-            pos += 1;
-        }
-    }
-    build_block_dict(combined, dict_len, sequences, literals, anchor)
+    compress_dfast_dict_ext(
+        combined,
+        dict_len,
+        params,
+        &mut short_table,
+        &mut long_table,
+        initial_rep,
+    )
 }
 
 fn compress_greedy_dict(
@@ -2657,38 +3227,24 @@ fn compress_greedy_dict(
     params: &CompressionParams,
     initial_rep: &[u32; 3],
 ) -> CompressedBlock {
-    let mut htable = HashTable::new(params.hash_log);
-    let mut chain = ChainTable::new(params.chain_log);
-    prefill_hash_chain(&mut htable, &mut chain, combined, dict_len, params);
-    let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
-    let mut anchor = dict_len;
-    let mut pos = dict_len;
-    let end = combined.len().saturating_sub(8);
-    while pos < end {
-        let ll = (pos - anchor) as u32;
-        let best = search_hash_chain(combined, pos, &mut htable, &mut chain, &rep, params, ll);
-        if let Some(m) = best {
-            literals.extend_from_slice(&combined[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: m.off_base,
-                lit_len: ll,
-                match_len: m.match_len,
-            };
-            rep.update(seq.off_base, ll);
-            sequences.push(seq);
-            let me = pos + m.match_len as usize;
-            for p in (pos + 1)..me.min(end) {
-                insert_hash_chain(combined, p, &mut htable, &mut chain, params);
-            }
-            pos = me;
-            anchor = pos;
-        } else {
-            pos += 1;
-        }
-    }
-    build_block_dict(combined, dict_len, sequences, literals, anchor)
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    let mut chain = vec![0u32; 1 << params.chain_log];
+    prefill_hash_chain_ext(
+        &mut htable,
+        &mut chain,
+        params.hash_log,
+        combined,
+        dict_len,
+        params,
+    );
+    compress_greedy_dict_ext(
+        combined,
+        dict_len,
+        params,
+        &mut htable,
+        &mut chain,
+        initial_rep,
+    )
 }
 
 fn compress_lazy_dict(
@@ -2697,71 +3253,24 @@ fn compress_lazy_dict(
     params: &CompressionParams,
     initial_rep: &[u32; 3],
 ) -> CompressedBlock {
-    let mut htable = HashTable::new(params.hash_log);
-    let mut chain = ChainTable::new(params.chain_log);
-    prefill_hash_chain(&mut htable, &mut chain, combined, dict_len, params);
-    let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
-    let mut anchor = dict_len;
-    let mut pos = dict_len;
-    let end = combined.len().saturating_sub(8);
-    while pos < end {
-        let ll = (pos - anchor) as u32;
-        let m0 = match search_hash_chain(combined, pos, &mut htable, &mut chain, &rep, params, ll) {
-            Some(m) => m,
-            None => {
-                pos += 1;
-                continue;
-            }
-        };
-        if pos + 1 < end {
-            let ll1 = (pos + 1 - anchor) as u32;
-            if let Some(m1) = search_hash_chain(
-                combined,
-                pos + 1,
-                &mut htable,
-                &mut chain,
-                &rep,
-                params,
-                ll1,
-            ) {
-                if m0.is_better_lazy(&m1) {
-                    let llo = (pos + 1 - anchor) as u32;
-                    literals.extend_from_slice(&combined[anchor..pos + 1]);
-                    let seq = SequenceOut {
-                        off_base: m1.off_base,
-                        lit_len: llo,
-                        match_len: m1.match_len,
-                    };
-                    rep.update(seq.off_base, llo);
-                    sequences.push(seq);
-                    let me = pos + 1 + m1.match_len as usize;
-                    for p in (pos + 2)..me.min(end) {
-                        insert_hash_chain(combined, p, &mut htable, &mut chain, params);
-                    }
-                    pos = me;
-                    anchor = pos;
-                    continue;
-                }
-            }
-        }
-        literals.extend_from_slice(&combined[anchor..pos]);
-        let seq = SequenceOut {
-            off_base: m0.off_base,
-            lit_len: ll,
-            match_len: m0.match_len,
-        };
-        rep.update(seq.off_base, ll);
-        sequences.push(seq);
-        let me = pos + m0.match_len as usize;
-        for p in (pos + 1)..me.min(end) {
-            insert_hash_chain(combined, p, &mut htable, &mut chain, params);
-        }
-        pos = me;
-        anchor = pos;
-    }
-    build_block_dict(combined, dict_len, sequences, literals, anchor)
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    let mut chain = vec![0u32; 1 << params.chain_log];
+    prefill_hash_chain_ext(
+        &mut htable,
+        &mut chain,
+        params.hash_log,
+        combined,
+        dict_len,
+        params,
+    );
+    compress_lazy_dict_ext(
+        combined,
+        dict_len,
+        params,
+        &mut htable,
+        &mut chain,
+        initial_rep,
+    )
 }
 
 fn compress_lazy2_dict(
@@ -2770,80 +3279,24 @@ fn compress_lazy2_dict(
     params: &CompressionParams,
     initial_rep: &[u32; 3],
 ) -> CompressedBlock {
-    let mut htable = HashTable::new(params.hash_log);
-    let mut chain = ChainTable::new(params.chain_log);
-    prefill_hash_chain(&mut htable, &mut chain, combined, dict_len, params);
-    let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
-    let mut anchor = dict_len;
-    let mut pos = dict_len;
-    let end = combined.len().saturating_sub(8);
-    while pos < end {
-        let ll = (pos - anchor) as u32;
-        let m0 = match search_hash_chain(combined, pos, &mut htable, &mut chain, &rep, params, ll) {
-            Some(m) => m,
-            None => {
-                pos += 1;
-                continue;
-            }
-        };
-        let mut best_pos = pos;
-        let mut best_match = m0;
-        if pos + 1 < end {
-            let ll1 = (pos + 1 - anchor) as u32;
-            if let Some(m1) = search_hash_chain(
-                combined,
-                pos + 1,
-                &mut htable,
-                &mut chain,
-                &rep,
-                params,
-                ll1,
-            ) {
-                if best_match.is_better_lazy(&m1) {
-                    best_pos = pos + 1;
-                    best_match = m1;
-                    if pos + 2 < end {
-                        let ll2 = (pos + 2 - anchor) as u32;
-                        if let Some(m2) = search_hash_chain(
-                            combined,
-                            pos + 2,
-                            &mut htable,
-                            &mut chain,
-                            &rep,
-                            params,
-                            ll2,
-                        ) {
-                            if best_match.is_better_lazy(&m2) {
-                                best_pos = pos + 2;
-                                best_match = m2;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let llo = (best_pos - anchor) as u32;
-        literals.extend_from_slice(&combined[anchor..best_pos]);
-        let seq = SequenceOut {
-            off_base: best_match.off_base,
-            lit_len: llo,
-            match_len: best_match.match_len,
-        };
-        rep.update(seq.off_base, llo);
-        sequences.push(seq);
-        let me = best_pos + best_match.match_len as usize;
-        for p in (pos + 1)..me.min(end) {
-            let already = p == pos || p == pos + 1 || (p == pos + 2 && best_pos >= pos + 2);
-            if !already {
-                insert_hash_chain(combined, p, &mut htable, &mut chain, params);
-            }
-        }
-        pos = me;
-        anchor = pos;
-    }
-    build_block_dict(combined, dict_len, sequences, literals, anchor)
+    let mut htable = vec![0u32; 1 << params.hash_log];
+    let mut chain = vec![0u32; 1 << params.chain_log];
+    prefill_hash_chain_ext(
+        &mut htable,
+        &mut chain,
+        params.hash_log,
+        combined,
+        dict_len,
+        params,
+    );
+    compress_lazy2_dict_ext(
+        combined,
+        dict_len,
+        params,
+        &mut htable,
+        &mut chain,
+        initial_rep,
+    )
 }
 
 fn prefill_binary_tree(

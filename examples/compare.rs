@@ -32,7 +32,9 @@ fn make_random_data(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
     let mut state = 0x12345678u64;
     for _ in 0..size {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         data.push((state >> 33) as u8);
     }
     data
@@ -93,16 +95,35 @@ fn main() {
         .iter()
         .flat_map(|&(size, label)| {
             vec![
-                (format!("text_{}", label).leak() as &str, make_text_data(size)),
-                (format!("mixed_{}", label).leak() as &str, make_mixed_data(size)),
-                (format!("random_{}", label).leak() as &str, make_random_data(size)),
+                (
+                    format!("text_{}", label).leak() as &str,
+                    make_text_data(size),
+                ),
+                (
+                    format!("mixed_{}", label).leak() as &str,
+                    make_mixed_data(size),
+                ),
+                (
+                    format!("random_{}", label).leak() as &str,
+                    make_random_data(size),
+                ),
             ]
         })
         .collect();
 
     println!("=== COMPRESSION RATIO & SPEED ===");
-    println!("{:<15} {:>5} {:>10} {:>10} {:>8} {:>10} {:>10} {:>8} {:>8}",
-        "Dataset", "Level", "Zen Size", "C Size", "Ratio", "Zen MB/s", "C MB/s", "Speedup", "ZenRatio");
+    println!(
+        "{:<15} {:>5} {:>10} {:>10} {:>8} {:>10} {:>10} {:>8} {:>8}",
+        "Dataset",
+        "Level",
+        "Zen Size",
+        "C Size",
+        "Ratio",
+        "Zen MB/s",
+        "C MB/s",
+        "Speedup",
+        "ZenRatio"
+    );
 
     for (name, data) in &datasets {
         let iters = if data.len() >= 1_000_000 { 3 } else { 10 };
@@ -115,15 +136,19 @@ fn main() {
             let c_mbps = data.len() as f64 / c_time / 1_000_000.0;
             let speedup = c_mbps / zen_mbps;
 
-            println!("{:<15} {:>5} {:>10} {:>10} {:>7.2}x {:>9.1} {:>9.1} {:>7.1}x {:>7.1}x",
-                name, level, zen_size, c_size, size_ratio, zen_mbps, c_mbps, speedup, zen_ratio);
+            println!(
+                "{:<15} {:>5} {:>10} {:>10} {:>7.2}x {:>9.1} {:>9.1} {:>7.1}x {:>7.1}x",
+                name, level, zen_size, c_size, size_ratio, zen_mbps, c_mbps, speedup, zen_ratio
+            );
         }
         println!();
     }
 
     println!("\n=== DECOMPRESSION SPEED ===");
-    println!("{:<15} {:>10} {:>10} {:>8}",
-        "Dataset", "Zen MB/s", "C MB/s", "Speedup");
+    println!(
+        "{:<15} {:>10} {:>10} {:>8}",
+        "Dataset", "Zen MB/s", "C MB/s", "Speedup"
+    );
 
     for (name, data) in &datasets {
         let iters = if data.len() >= 1_000_000 { 10 } else { 50 };
@@ -132,7 +157,9 @@ fn main() {
         let c_mbps = data.len() as f64 / c_time / 1_000_000.0;
         let speedup = c_mbps / zen_mbps;
 
-        println!("{:<15} {:>9.1} {:>9.1} {:>7.1}x",
-            name, zen_mbps, c_mbps, speedup);
+        println!(
+            "{:<15} {:>9.1} {:>9.1} {:>7.1}x",
+            name, zen_mbps, c_mbps, speedup
+        );
     }
 }

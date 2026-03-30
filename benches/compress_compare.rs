@@ -39,7 +39,9 @@ fn make_random(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
     let mut s = 0x12345678u64;
     for _ in 0..size {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         data.push((s >> 33) as u8);
     }
     data
@@ -72,9 +74,7 @@ fn compress_benchmarks(suite: &mut Suite) {
             let data = text_100k.clone();
             g.bench(format!("c_zstd_L{level}"), move |b| {
                 let data = data.clone();
-                b.iter(|| {
-                    black_box(zstd::stream::encode_all(Cursor::new(&data), level).unwrap())
-                })
+                b.iter(|| black_box(zstd::stream::encode_all(Cursor::new(&data), level).unwrap()))
             });
         }
     });
@@ -98,9 +98,7 @@ fn compress_benchmarks(suite: &mut Suite) {
             let data = mixed_100k.clone();
             g.bench(format!("c_zstd_L{level}"), move |b| {
                 let data = data.clone();
-                b.iter(|| {
-                    black_box(zstd::stream::encode_all(Cursor::new(&data), level).unwrap())
-                })
+                b.iter(|| black_box(zstd::stream::encode_all(Cursor::new(&data), level).unwrap()))
             });
         }
     });
