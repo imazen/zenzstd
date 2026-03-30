@@ -1,1 +1,10 @@
 .claude/worktrees/
+target/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+perf.data
+perf.data.old
+flamegraph.svg
