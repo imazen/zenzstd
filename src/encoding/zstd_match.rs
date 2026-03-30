@@ -18,7 +18,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::compress_params::{CompressionParams, Strategy};
-use super::hash::{count_match, hash_ptr, hash8};
+use super::hash::{count_match, hash_ptr, hash3, hash8};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1926,16 +1926,20 @@ impl BinaryTree {
     /// of C zstd's `ZSTD_insertBtAndGetAllMatches`.
     ///
     /// `matches_out` is filled with `(off_base, match_len)` pairs.
-    /// Returns the number of matches found.
+    ///
+    /// Unlike the repcode and hash3 match finders which use `sufficient_len`,
+    /// the BT walk only terminates early when `match_len > ZSTD_OPT_NUM` or
+    /// when the match reaches the end of input. This matches C zstd behavior
+    /// where `sufficient_len` is NOT checked inside the tree walk.
     #[allow(clippy::too_many_arguments)]
     fn insert_and_find_all(
         &mut self,
         src: &[u8],
         pos: usize,
         min_match: usize,
+        best_length_in: usize,
         search_depth: usize,
         window_low: usize,
-        sufficient_len: usize,
         matches_out: &mut Vec<MatchFound>,
     ) {
         matches_out.clear();
@@ -1961,7 +1965,7 @@ impl BinaryTree {
         let mut common_len_smaller: usize = 0;
         let mut common_len_larger: usize = 0;
 
-        let mut best_length: usize = if min_match > 0 { min_match - 1 } else { 0 };
+        let mut best_length: usize = best_length_in;
         let mut candidate = match_index;
         let mut depth = search_depth;
 
@@ -1985,7 +1989,9 @@ impl BinaryTree {
                     len: match_len as u32,
                 });
 
-                if match_len >= sufficient_len
+                // C zstd only breaks here on very long matches (> OPT_NUM) or
+                // end-of-input. It does NOT use sufficient_len in the BT walk.
+                if match_len > ZSTD_OPT_NUM
                     || pos + match_len >= src.len()
                     || candidate + match_len >= src.len()
                 {
@@ -2450,7 +2456,8 @@ impl OptState {
     }
 
     /// Downscale statistics for subsequent blocks (not the first block).
-    #[allow(dead_code)]
+    /// Called by BtUltra2's two-pass strategy to rescale accumulated first-pass
+    /// statistics before the second compression pass.
     fn rescale(&mut self) {
         self.lit_sum = scale_stats(&mut self.lit_freq, MAX_LIT, 12);
         self.lit_length_sum = scale_stats(&mut self.lit_length_freq, MAX_LL, 11);
@@ -2460,7 +2467,7 @@ impl OptState {
     }
 
     /// Cost of raw literals (without the literal-length symbol cost).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Available for future use
     fn raw_literals_cost(&self, literals: &[u8]) -> i32 {
         if literals.is_empty() {
             return 0;
@@ -2657,9 +2664,49 @@ fn update_tree(
     }
 }
 
-/// Get all matches at `pos` using the binary tree, including repcodes.
+/// Hash3 table for finding 3-byte matches (used when mls==3).
+/// Equivalent to C zstd's hashTable3 + nextToUpdate3.
+struct Hash3Table {
+    table: Vec<u32>,
+    hash_log: u32,
+    next_to_update: usize,
+}
+
+impl Hash3Table {
+    fn new(window_log: u32) -> Self {
+        // C zstd: hashLog3 = min(ZSTD_HASHLOG3_MAX=17, windowLog)
+        let hash_log = window_log.min(17);
+        Self {
+            table: vec![0; 1 << hash_log],
+            hash_log,
+            next_to_update: 0,
+        }
+    }
+
+    /// Update hash3 table up to (not including) `target`, then look up `pos`.
+    /// Equivalent to C zstd's ZSTD_insertAndFindFirstIndexHash3.
+    fn insert_and_find(&mut self, src: &[u8], pos: usize) -> u32 {
+        let mut idx = self.next_to_update;
+        while idx < pos {
+            if idx + 4 <= src.len() {
+                let h = hash3(&src[idx..], self.hash_log) as usize;
+                self.table[h] = idx as u32;
+            }
+            idx += 1;
+        }
+        self.next_to_update = pos;
+        if pos + 4 <= src.len() {
+            let h = hash3(&src[pos..], self.hash_log) as usize;
+            self.table[h]
+        } else {
+            0
+        }
+    }
+}
+
+/// Get all matches at `pos` using the binary tree, including repcodes and hash3.
 /// Matches are appended to `matches_out` sorted by increasing length.
-/// Repcodes come first (if found), then BT matches.
+/// Repcodes come first (if found), then hash3 match (if mls==3), then BT matches.
 #[allow(clippy::too_many_arguments)]
 fn get_all_matches(
     bt: &mut BinaryTree,
@@ -2672,6 +2719,7 @@ fn get_all_matches(
     window_size: usize,
     sufficient_len: usize,
     next_to_update: &mut usize,
+    hash3_table: Option<&mut Hash3Table>,
     matches_out: &mut Vec<MatchFound>,
 ) {
     matches_out.clear();
@@ -2742,15 +2790,40 @@ fn get_all_matches(
         }
     }
 
-    // Search binary tree for all matches
+    // HC3 match finder for mls==3 (equivalent to C zstd's hash3 lookup)
+    if let Some(h3) = hash3_table {
+        if min_match == 3 && best_length < 3 {
+            let match_index = h3.insert_and_find(src, pos) as usize;
+            let match_low = if window_low > 0 { window_low } else { 1 };
+            // Heuristic from C zstd: only use hash3 matches within 2^18 distance
+            if match_index >= match_low && match_index < pos && pos - match_index < (1 << 18) {
+                let ml = count_match(&src[pos..], &src[match_index..]);
+                if ml >= 3 {
+                    best_length = ml;
+                    matches_out.push(MatchFound {
+                        off_base: (pos - match_index) as u32 + 3,
+                        len: ml as u32,
+                    });
+                    if ml > sufficient_len || pos + ml >= src.len() {
+                        *next_to_update = pos + 1;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Search binary tree for all matches.
+    // Pass best_length so the BT only returns matches longer than what we already have.
+    // Do NOT pass sufficient_len — the BT walk should search exhaustively (matching C zstd).
     let mut bt_matches = Vec::new();
     bt.insert_and_find_all(
         src,
         pos,
         min_match,
+        best_length,
         search_depth,
         window_low,
-        sufficient_len,
         &mut bt_matches,
     );
 
@@ -2778,8 +2851,23 @@ fn get_all_matches(
 /// 2. Forward-fill a price table evaluating literal vs match at each position
 /// 3. Backtrack to find the minimum-cost sequence of matches/literals
 /// 4. Emit those sequences
+///
+/// For BtUltra2, does a two-pass strategy on the first block: a first pass
+/// to collect frequency statistics, then a second pass using those statistics
+/// for better cost estimates (matching C zstd's ZSTD_initStats_ultra).
 fn compress_btopt(src: &[u8], params: &CompressionParams) -> CompressedBlock {
-    compress_optimal_generic(src, params, &[1, 4, 8], 0)
+    if params.strategy == Strategy::BtUltra2 && src.len() > 8 {
+        // Two-pass strategy: first pass collects statistics, second pass compresses.
+        // This matches C zstd's ZSTD_compressBlock_btultra2 behavior.
+        let mut stats_state = OptState::new(2);
+        stats_state.init_from_source(src);
+        // First pass: compress to gather statistics (discard output)
+        compress_optimal_generic_with_stats(src, params, &[1, 4, 8], 0, &mut stats_state, true);
+        // Second pass: compress with gathered statistics
+        compress_optimal_generic_with_stats(src, params, &[1, 4, 8], 0, &mut stats_state, false)
+    } else {
+        compress_optimal_generic(src, params, &[1, 4, 8], 0)
+    }
 }
 
 /// Core optimal parser, parameterized by initial rep offsets and start offset
@@ -2795,6 +2883,25 @@ fn compress_optimal_generic(
         _ => 0,
     };
 
+    let mut opt_state = OptState::new(opt_level);
+    opt_state.init_from_source(&src[start_pos..]);
+    compress_optimal_generic_with_stats(src, params, initial_rep, start_pos, &mut opt_state, false)
+}
+
+/// Core optimal parser that accepts pre-initialized statistics.
+/// When `stats_only` is true, only updates statistics (for the first pass of BtUltra2's
+/// two-pass strategy) and returns an empty block. The statistics in `opt_state` are
+/// left in their accumulated form, ready for the second pass to rescale and use.
+fn compress_optimal_generic_with_stats(
+    src: &[u8],
+    params: &CompressionParams,
+    initial_rep: &[u32; 3],
+    start_pos: usize,
+    opt_state: &mut OptState,
+    stats_only: bool,
+) -> CompressedBlock {
+    let opt_level = opt_state.opt_level;
+
     let min_match = if params.min_match == 3 { 3 } else { 4 };
     let sufficient_len = (params.target_length as usize).min(ZSTD_OPT_NUM - 1);
     let search_depth = params.search_depth();
@@ -2803,13 +2910,26 @@ fn compress_optimal_generic(
     let mut bt = BinaryTree::new(params.hash_log, params.chain_log);
     let mut rep = *initial_rep;
 
+    // Hash3 table for mls==3 (levels 18-22 typically use min_match=3)
+    let mut hash3_table = if min_match == 3 {
+        Some(Hash3Table::new(params.window_log))
+    } else {
+        None
+    };
+
     // Prefill tree for dict positions
     if start_pos > 0 {
         prefill_binary_tree(&mut bt, src, start_pos, params);
     }
 
-    let mut opt_state = OptState::new(opt_level);
-    opt_state.init_from_source(&src[start_pos..]);
+    // If we have accumulated statistics from a previous pass, rescale them
+    // for reuse (matching C zstd's ZSTD_rescaleFreqs behavior on subsequent blocks).
+    if stats_only {
+        // First pass: stats are freshly initialized, use as-is
+    } else if opt_state.lit_length_sum > 0 {
+        // Subsequent pass or second pass of BtUltra2: rescale accumulated stats
+        opt_state.rescale();
+    }
 
     let mut sequences: Vec<SequenceOut> = Vec::new();
     let mut literals: Vec<u8> = Vec::new();
@@ -2841,6 +2961,7 @@ fn compress_optimal_generic(
             window_size,
             sufficient_len,
             &mut next_to_update,
+            hash3_table.as_mut(),
             &mut matches_buf,
         );
 
@@ -2860,18 +2981,19 @@ fn compress_optimal_generic(
 
         // Large match: immediate encoding (skip optimal parsing)
         if max_ml > sufficient_len {
-            // Emit directly
-            literals.extend_from_slice(&src[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: max_off,
-                lit_len: litlen,
-                match_len: max_ml as u32,
-            };
+            if !stats_only {
+                literals.extend_from_slice(&src[anchor..pos]);
+                let seq = SequenceOut {
+                    off_base: max_off,
+                    lit_len: litlen,
+                    match_len: max_ml as u32,
+                };
+                sequences.push(seq);
+            }
             opt_state.update_stats(litlen, &src[anchor..pos], max_off, max_ml as u32);
             let mut tmp_rep = RepCodes { rep };
-            tmp_rep.update(seq.off_base, litlen);
+            tmp_rep.update(max_off, litlen);
             rep = tmp_rep.rep;
-            sequences.push(seq);
             pos += max_ml;
             anchor = pos;
             opt_state.set_base_prices();
@@ -2928,15 +3050,65 @@ fn compress_optimal_generic(
                 // Try extending with a literal (from position cur-1 to cur)
                 {
                     let prev_litlen = opt[cur - 1].litlen + 1;
+                    let ll_inc_price = opt_state.lit_length_price(prev_litlen)
+                        - opt_state.lit_length_price(prev_litlen - 1);
                     let price = opt[cur - 1].price
                         + opt_state.single_literal_cost(src[inr - 1])
-                        + (opt_state.lit_length_price(prev_litlen)
-                            - opt_state.lit_length_price(prev_litlen - 1));
+                        + ll_inc_price;
 
                     if price <= opt[cur].price {
+                        // Save the previous match state before overwriting (for optLevel>=1 check)
+                        let prev_match =
+                            if opt_level >= 1 && opt[cur].litlen == 0 && opt[cur].mlen > 0 {
+                                Some(opt[cur].clone())
+                            } else {
+                                None
+                            };
+
                         opt[cur] = opt[cur - 1].clone();
                         opt[cur].litlen = prev_litlen;
                         opt[cur].price = price;
+
+                        // optLevel>=1 additional check: consider "match + 1 literal" vs
+                        // "more literals" pattern. This is a key optimization from C zstd
+                        // that checks if keeping the previous match and adding just 1 literal
+                        // is cheaper than extending the literal run from further back.
+                        //
+                        // C zstd checks LL_INCPRICE(1) which is LL_PRICE(1) - LL_PRICE(0),
+                        // i.e., whether literal length 1 is cheaper than literal length 0.
+                        if let Some(prev_match_node) = prev_match {
+                            let ll1_inc =
+                                opt_state.lit_length_price(1) - opt_state.lit_length_price(0);
+                            if opt_level >= 1
+                                && ll1_inc < 0  // ll=1 is cheaper than ll=0
+                                && inr < src.len()
+                                && cur + 1 < opt.len()
+                            {
+                                let with_1lit = prev_match_node.price
+                                    + opt_state.single_literal_cost(src[inr])
+                                    + ll1_inc;
+                                let with_more_lits = price
+                                    + opt_state.single_literal_cost(src[inr])
+                                    + (opt_state.lit_length_price(prev_litlen + 1)
+                                        - opt_state.lit_length_price(prev_litlen));
+                                if with_1lit < with_more_lits && with_1lit < opt[cur + 1].price {
+                                    // Update rep offsets before the match disappears
+                                    let prev = cur - prev_match_node.mlen as usize;
+                                    let new_reps = new_rep(
+                                        &opt[prev].rep,
+                                        prev_match_node.off,
+                                        opt[prev].litlen == 0,
+                                    );
+                                    opt[cur + 1] = prev_match_node;
+                                    opt[cur + 1].rep = new_reps;
+                                    opt[cur + 1].litlen = 1;
+                                    opt[cur + 1].price = with_1lit;
+                                    if last_pos < cur + 1 {
+                                        last_pos = cur + 1;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2979,6 +3151,7 @@ fn compress_optimal_generic(
                     window_size,
                     sufficient_len,
                     &mut next_to_update,
+                    hash3_table.as_mut(),
                     &mut matches_buf,
                 );
 
@@ -3128,16 +3301,17 @@ fn compress_optimal_generic(
             // Emit sequence
             let lit_start = anchor;
             let lit_end = anchor + llen as usize;
-            if lit_end > lit_start {
-                literals.extend_from_slice(&src[lit_start..lit_end]);
+            if !stats_only {
+                if lit_end > lit_start {
+                    literals.extend_from_slice(&src[lit_start..lit_end]);
+                }
+                sequences.push(SequenceOut {
+                    off_base: off,
+                    lit_len: llen,
+                    match_len: mlen,
+                });
             }
             opt_state.update_stats(llen, &src[lit_start..lit_end], off, mlen);
-
-            sequences.push(SequenceOut {
-                off_base: off,
-                lit_len: llen,
-                match_len: mlen,
-            });
 
             anchor = lit_end + mlen as usize;
             pos = anchor;
@@ -3145,6 +3319,14 @@ fn compress_optimal_generic(
 
         opt_state.set_base_prices();
     } // main loop
+
+    if stats_only {
+        // Return empty block; statistics are accumulated in opt_state
+        return CompressedBlock {
+            literals: Vec::new(),
+            sequences: Vec::new(),
+        };
+    }
 
     // Build output block with trailing literals
     if anchor > start_pos {

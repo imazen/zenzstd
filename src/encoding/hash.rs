@@ -8,6 +8,9 @@
 //! The primes were chosen by the zstd authors to give good avalanche properties
 //! for short byte sequences.
 
+/// Hash constant for 3-byte keys (from C zstd).
+const PRIME_3: u32 = 506_832_829;
+
 /// Knuth multiplicative hash constant for 4-byte keys.
 const PRIME_4: u32 = 2_654_435_761;
 
@@ -48,6 +51,20 @@ fn read_le32(data: &[u8]) -> u32 {
 fn read_le64(data: &[u8]) -> u64 {
     let bytes: &[u8; 8] = data[..8].try_into().unwrap();
     u64::from_le_bytes(*bytes)
+}
+
+/// Hash the first 3 bytes of `data` into `hash_bits` bits.
+///
+/// Equivalent to C zstd's `ZSTD_hash3Ptr`. Reads a LE u32 and masks to
+/// 24 bits, then multiplies by `PRIME_3`.
+///
+/// # Panics
+///
+/// Panics if `data.len() < 4` or `hash_bits > 32` or `hash_bits == 0`.
+#[inline(always)]
+pub fn hash3(data: &[u8], hash_bits: u32) -> u32 {
+    debug_assert!(hash_bits > 0 && hash_bits <= 32);
+    (read_le32(data) << 8).wrapping_mul(PRIME_3) >> (32 - hash_bits)
 }
 
 /// Hash the first 4 bytes of `data` into `hash_bits` bits.

@@ -8,7 +8,7 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 - `src/encoding/` — Full compressor with levels 1-22
   - `zstd_match.rs` — Core match finder: Fast, DFast, Greedy, Lazy, Lazy2, BtLazy2, BtOpt/BtUltra/BtUltra2 strategies
   - `compress_params.rs` — All 4 zstd compression parameter tables (default/256K/128K/16K)
-  - `hash.rs` — zstd hash functions (hash4-hash8 matching C primes)
+  - `hash.rs` — zstd hash functions (hash3-hash8 matching C primes)
   - `simd.rs` — AVX2 count_match (32B/iter via archmage incant!), 4-way histogram
   - `blocks/compressed.rs` — Sequence/literal encoding (FSE + Huffman)
   - `streaming_encoder.rs` — `impl std::io::Write` streaming encoder
@@ -51,9 +51,18 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 ### Decompression speed
 zenzstd 1.91 GiB/s vs C 5.64 GiB/s (3x gap)
 
-## Known Bugs
+## Known Issues
 
-None currently.
+### L16-22 compression ratio gap (zen/c = 1.17 on mixed_100KB)
+The remaining gap at optimal parser levels is primarily caused by **missing block splitting**,
+not by the match finder. C zstd splits 100KB into 5 blocks (~20KB each) via `zstd_preSplit.c`,
+allowing per-block FSE/Huffman tables tuned to local statistics. Our encoder puts all data in
+one block with one set of tables. The match finder itself achieves 88.8% repcode matches and
+only 616 literal bytes on 100KB mixed data — very close to C's match quality. Next step:
+implement block splitting in `blocks/compressed.rs` or the streaming encoder.
+
+Additionally, `blocks/compressed.rs` uses raw (uncompressed) literals when literal count <= 1024,
+which misses Huffman compression on small literal sections.
 
 ## Features
 
