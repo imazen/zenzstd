@@ -13,6 +13,7 @@ use super::frame_compressor::{CompressState, FseTables};
 use super::frame_header::FrameHeader;
 use super::levels::*;
 use super::match_generator::MatchGeneratorDriver;
+use super::zstd_match::MatchState;
 use super::{CompressionLevel, EncoderDictionary, Matcher};
 
 #[cfg(feature = "hash")]
@@ -52,6 +53,8 @@ pub struct StreamingEncoder<W: io::Write> {
     hasher: XxHash64,
     state: CompressState<MatchGeneratorDriver>,
     is_first_block: bool,
+    /// Cross-block match state for levels >= 3.
+    match_state: Option<MatchState>,
 }
 
 impl<W: io::Write> StreamingEncoder<W> {
@@ -73,6 +76,7 @@ impl<W: io::Write> StreamingEncoder<W> {
                 fse_tables: FseTables::new(),
             },
             is_first_block: true,
+            match_state: None,
         }
     }
 
@@ -90,6 +94,7 @@ impl<W: io::Write> StreamingEncoder<W> {
         }
         self.state.matcher.reset(self.level);
         self.state.last_huff_table = None;
+        self.match_state = None; // Reset cross-block state for new frame
 
         let dict_id = self.dictionary.as_ref().map(|d| d.id as u64);
         let header = FrameHeader {
@@ -162,6 +167,13 @@ impl<W: io::Write> StreamingEncoder<W> {
                 } else {
                     None
                 };
+
+                // Lazily create cross-block match state
+                let params = crate::encoding::compress_params::params_for_level(level_num, None);
+                if self.match_state.is_none() {
+                    self.match_state = Some(MatchState::new(&params));
+                }
+
                 zstd_levels::compress_level(
                     &mut self.state,
                     last_block,
@@ -171,6 +183,7 @@ impl<W: io::Write> StreamingEncoder<W> {
                     &mut output,
                     dict_content,
                     dict_rep,
+                    self.match_state.as_mut(),
                 );
                 self.state.matcher.commit_space(data);
                 self.state.matcher.skip_matching();

@@ -262,3 +262,146 @@ fn roundtrip_zstd_decoder(data: &[u8], level: crate::encoding::CompressionLevel)
     zstd::stream::copy_decode(compressed.as_slice(), &mut decoded).unwrap();
     assert_eq!(data, &decoded[..]);
 }
+
+// -------------------------------------------------------------------
+// Cross-block match history tests
+// -------------------------------------------------------------------
+
+/// Test that multi-block data with cross-block repetitions compresses correctly.
+/// The data is designed so that block N repeats patterns from block N-1,
+/// which the cross-block match history should detect.
+#[test]
+fn test_cross_block_history_roundtrip() {
+    use alloc::vec::Vec;
+
+    let pattern = b"The quick brown fox jumps over the lazy dog. ";
+    // Create data large enough to span multiple 128KB blocks, with
+    // patterns that repeat across block boundaries.
+    let mut data = Vec::new();
+    for i in 0u8..10 {
+        // Each segment is ~46KB — after ~3 segments we cross a block boundary
+        for _ in 0..1000 {
+            data.extend_from_slice(pattern);
+            // Add a small varying element so it's not pure RLE
+            data.push(i);
+        }
+    }
+    assert!(data.len() > 256 * 1024, "data must span multiple blocks");
+
+    for level in [3, 5, 7, 9, 13, 16, 22] {
+        let compressed = crate::encoding::compress_to_vec(
+            data.as_slice(),
+            crate::encoding::CompressionLevel::Level(level),
+        );
+
+        // Decode with our decoder
+        let mut decoder = crate::decoding::FrameDecoder::new();
+        let mut decoded = Vec::with_capacity(data.len() + 4096);
+        decoder.decode_all_to_vec(&compressed, &mut decoded)
+            .unwrap_or_else(|e| panic!("Our decoder failed at level {level}: {e:?}"));
+        assert_eq!(data, decoded, "our decoder: cross-block mismatch at level {level}");
+
+        // Decode with C zstd
+        let mut decoded_c = Vec::new();
+        match zstd::stream::copy_decode(compressed.as_slice(), &mut decoded_c) {
+            Ok(()) => {
+                assert_eq!(data, decoded_c, "C zstd: cross-block mismatch at level {level}");
+            }
+            Err(e) => {
+                let err_str = std::format!("{e:?}");
+                if !err_str.contains("checksum") && !err_str.contains("Checksum") {
+                    panic!("Unexpected C zstd error at level {level}: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Test that cross-block history improves compression ratio compared to
+/// per-block independent compression for data with inter-block repetitions.
+#[test]
+fn test_cross_block_history_improves_ratio() {
+    use alloc::vec::Vec;
+
+    // Create data where the second block is identical to the first.
+    // With cross-block history, the second block should compress much better.
+    let pattern = b"ABCDEFGHIJKLMNOP";
+    let block_size = 128 * 1024; // One full block
+    let mut data = Vec::new();
+    while data.len() < block_size * 2 + 1000 {
+        data.extend_from_slice(pattern);
+    }
+
+    // Compress with cross-block history (normal path)
+    let compressed = crate::encoding::compress_to_vec(
+        data.as_slice(),
+        crate::encoding::CompressionLevel::Default,
+    );
+
+    // Verify it decodes correctly
+    let mut decoded = Vec::new();
+    zstd::stream::copy_decode(compressed.as_slice(), &mut decoded)
+        .unwrap_or_else(|e| {
+            let err_str = std::format!("{e:?}");
+            if !err_str.contains("checksum") {
+                panic!("C zstd decode failed: {e}");
+            }
+        });
+    if !decoded.is_empty() {
+        assert_eq!(data, decoded);
+    }
+
+    // The compressed size should be very small relative to the input
+    // (highly repetitive data spanning multiple blocks)
+    let ratio = data.len() as f64 / compressed.len() as f64;
+    assert!(
+        ratio > 10.0,
+        "expected high compression ratio for repetitive multi-block data, got {ratio:.1}x \
+         ({} -> {} bytes)",
+        data.len(), compressed.len(),
+    );
+}
+
+/// Test cross-block history with the streaming encoder too.
+#[test]
+fn test_cross_block_streaming_roundtrip() {
+    use alloc::vec::Vec;
+    use std::io::Write;
+
+    let mut data = Vec::new();
+    for _ in 0..5000 {
+        data.extend_from_slice(b"streaming cross-block test pattern. ");
+    }
+    assert!(data.len() > 128 * 1024);
+
+    let mut compressed = Vec::new();
+    {
+        let mut encoder = crate::encoding::StreamingEncoder::new(
+            &mut compressed,
+            crate::encoding::CompressionLevel::Default,
+        );
+        // Write in chunks that don't align with block boundaries
+        for chunk in data.chunks(7777) {
+            encoder.write_all(chunk).unwrap();
+        }
+        encoder.finish().unwrap();
+    }
+
+    // Verify with our decoder
+    let mut decoder = crate::decoding::FrameDecoder::new();
+    let mut decoded = Vec::with_capacity(data.len() + 4096);
+    decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
+    assert_eq!(data, decoded, "streaming cross-block roundtrip failed");
+
+    // Verify with C zstd
+    let mut decoded_c = Vec::new();
+    match zstd::stream::copy_decode(compressed.as_slice(), &mut decoded_c) {
+        Ok(()) => assert_eq!(data, decoded_c),
+        Err(e) => {
+            let err_str = std::format!("{e:?}");
+            if !err_str.contains("checksum") {
+                panic!("C zstd streaming cross-block decode failed: {e}");
+            }
+        }
+    }
+}

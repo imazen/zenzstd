@@ -8,6 +8,7 @@ use core::convert::TryInto;
 use super::{
     CompressionLevel, EncoderDictionary, Matcher, block_header::BlockHeader,
     frame_header::FrameHeader, levels::*, match_generator::MatchGeneratorDriver,
+    zstd_match::MatchState,
 };
 use crate::fse::fse_encoder::{FSETable, default_ll_table, default_ml_table, default_of_table};
 
@@ -38,6 +39,9 @@ pub struct FrameCompressor<R: Read, W: Write, M: Matcher> {
     compression_level: CompressionLevel,
     dictionary: Option<EncoderDictionary>,
     state: CompressState<M>,
+    /// Cross-block match state for levels >= 3 (zstd match finder).
+    /// Created lazily on the first block and reused across blocks within a frame.
+    match_state: Option<MatchState>,
     #[cfg(feature = "hash")]
     hasher: XxHash64,
 }
@@ -83,6 +87,7 @@ impl<R: Read, W: Write> FrameCompressor<R, W, MatchGeneratorDriver> {
                 last_huff_table: None,
                 fse_tables: FseTables::new(),
             },
+            match_state: None,
             #[cfg(feature = "hash")]
             hasher: XxHash64::with_seed(0),
         }
@@ -101,6 +106,7 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                 last_huff_table: None,
                 fse_tables: FseTables::new(),
             },
+            match_state: None,
             compression_level,
             #[cfg(feature = "hash")]
             hasher: XxHash64::with_seed(0),
@@ -146,6 +152,7 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
         // Clearing buffers to allow re-using of the compressor
         self.state.matcher.reset(self.compression_level);
         self.state.last_huff_table = None;
+        self.match_state = None; // Reset cross-block state for new frame
         #[cfg(feature = "hash")]
         {
             self.hasher = XxHash64::with_seed(0);
@@ -219,6 +226,17 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                 | CompressionLevel::Best
                 | CompressionLevel::Level(_) => {
                     let level = self.compression_level.to_level();
+
+                    // Lazily create the cross-block match state on the first
+                    // zstd-level block. This persists across all blocks in
+                    // the frame, allowing cross-block match references.
+                    let params = crate::encoding::compress_params::params_for_level(level, None);
+                    if self.match_state.is_none() {
+                        self.match_state = Some(MatchState::new(&params));
+                    }
+
+                    // Dict content/rep are passed on first block for seeding;
+                    // MatchState handles subsequent blocks via its window.
                     let dict_for_block = if is_first_block { dict_content } else { None };
                     let rep_for_block = if is_first_block { dict_rep } else { None };
                     super::levels::zstd_levels::compress_level(
@@ -230,6 +248,7 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                         output,
                         dict_for_block,
                         rep_for_block,
+                        self.match_state.as_mut(),
                     );
                     self.state.matcher.commit_space(uncompressed_data);
                     self.state.matcher.skip_matching();
