@@ -33,7 +33,7 @@ pub fn compress_block<M: Matcher>(state: &mut CompressState<M>, output: &mut Vec
     // literals section
 
     let mut writer = BitWriter::from(output);
-    if literals_vec.len() > 1024 {
+    if literals_vec.len() >= 32 {
         if let Some(table) =
             compress_literals(&literals_vec, state.last_huff_table.as_ref(), &mut writer)
         {
@@ -85,14 +85,20 @@ pub fn compress_block<M: Matcher>(state: &mut CompressState<M>, output: &mut Vec
             of_mode.as_ref(),
         );
 
-        if let FseTableMode::Encoded(table) = ll_mode {
-            state.fse_tables.ll_previous = Some(table)
+        match ll_mode {
+            FseTableMode::Encoded(table) => state.fse_tables.ll_previous = Some(table),
+            FseTableMode::RepeateLast(t) => state.fse_tables.ll_previous = Some(t.clone()),
+            FseTableMode::Predefined(_) => state.fse_tables.ll_previous = None,
         }
-        if let FseTableMode::Encoded(table) = ml_mode {
-            state.fse_tables.ml_previous = Some(table)
+        match ml_mode {
+            FseTableMode::Encoded(table) => state.fse_tables.ml_previous = Some(table),
+            FseTableMode::RepeateLast(t) => state.fse_tables.ml_previous = Some(t.clone()),
+            FseTableMode::Predefined(_) => state.fse_tables.ml_previous = None,
         }
-        if let FseTableMode::Encoded(table) = of_mode {
-            state.fse_tables.of_previous = Some(table)
+        match of_mode {
+            FseTableMode::Encoded(table) => state.fse_tables.of_previous = Some(table),
+            FseTableMode::RepeateLast(t) => state.fse_tables.of_previous = Some(t.clone()),
+            FseTableMode::Predefined(_) => state.fse_tables.of_previous = None,
         }
     }
     writer.flush();
@@ -122,17 +128,164 @@ fn choose_table<'a>(
     data: impl Iterator<Item = u8>,
     max_log: u8,
 ) -> FseTableMode<'a> {
-    // TODO check if the new table is better than the predefined and previous table
-    let use_new_table = true;
-    let use_previous_table = false;
-    if use_previous_table {
-        FseTableMode::RepeateLast(previous.unwrap())
-    } else if use_new_table {
-        FseTableMode::Encoded(build_table_from_data(data, max_log, true))
-    } else {
-        FseTableMode::Predefined(default_table)
+    // Collect symbol counts from the data
+    let mut counts = [0usize; 256];
+    let mut total = 0usize;
+    let mut max_symbol = 0u8;
+    for sym in data {
+        counts[sym as usize] += 1;
+        total += 1;
+        if sym > max_symbol {
+            max_symbol = sym;
+        }
     }
+
+    if total == 0 {
+        return FseTableMode::Predefined(default_table);
+    }
+
+    // Check for single-symbol RLE case — always use encoded (the encoder handles this)
+    let distinct = counts.iter().filter(|&&c| c > 0).count();
+    if distinct <= 1 {
+        return FseTableMode::Encoded(build_table_from_data(
+            counts
+                .iter()
+                .enumerate()
+                .flat_map(|(sym, &cnt)| core::iter::repeat_n(sym as u8, cnt)),
+            max_log,
+            true,
+        ));
+    }
+
+    // Build the new (compressed/encoded) table
+    let new_table = build_table_from_data(
+        counts
+            .iter()
+            .enumerate()
+            .flat_map(|(sym, &cnt)| core::iter::repeat_n(sym as u8, cnt)),
+        max_log,
+        true,
+    );
+
+    // Estimate encoded size with new table: table description + entropy bits
+    let new_table_desc_bits = estimate_table_description_bits(&new_table);
+    let new_entropy_bits = estimate_encoding_cost_with_table(&new_table, &counts, max_symbol);
+    let new_cost = new_table_desc_bits + new_entropy_bits;
+
+    // Estimate encoded size with predefined/default table (0 table overhead)
+    let default_cost =
+        estimate_encoding_cost_with_table(default_table, &counts, max_symbol);
+
+    // Estimate encoded size with previous table (0 table overhead)
+    let repeat_cost = previous.map(|prev| {
+        estimate_encoding_cost_with_table(prev, &counts, max_symbol)
+    });
+
+    // Pick the cheapest option
+    let mut best_cost = new_cost;
+    let mut best_mode = FseTableMode::Encoded(new_table);
+
+    if default_cost <= best_cost {
+        best_cost = default_cost;
+        best_mode = FseTableMode::Predefined(default_table);
+    }
+
+    if let (Some(prev), Some(rcost)) = (previous, repeat_cost) {
+        if rcost <= best_cost {
+            best_mode = FseTableMode::RepeateLast(prev);
+        }
+    }
+
+    best_mode
 }
+
+/// Estimate the number of bits needed to encode the table description.
+/// Uses a trial write to a temporary buffer.
+fn estimate_table_description_bits(table: &FSETable) -> usize {
+    let mut buf = Vec::with_capacity(128);
+    let mut writer = BitWriter::from(&mut buf);
+    table.write_table(&mut writer);
+    writer.flush();
+    // Return size in bits (byte-aligned, rounded up)
+    buf.len() * 8
+}
+
+/// Estimate the total encoding cost (in bits) of encoding data with the given
+/// FSE table, using cross-entropy calculation.
+///
+/// For each symbol, the cost is approximately:
+///   count[sym] * (acc_log - floor(log2(prob[sym])))
+///
+/// If a symbol appears in the data but has zero probability in the table,
+/// we return usize::MAX (table cannot encode this data).
+fn estimate_encoding_cost_with_table(
+    table: &FSETable,
+    counts: &[usize; 256],
+    max_symbol: u8,
+) -> usize {
+    let acc_log = table.acc_log() as usize;
+    let table_size = table.table_size;
+
+    // Check that the table can represent all symbols in the data.
+    // A symbol with probability 0 and zero states cannot be encoded.
+    for sym in 0..=max_symbol as usize {
+        if counts[sym] > 0 {
+            let prob = table.symbol_probability(sym as u8);
+            if prob == 0 {
+                return usize::MAX;
+            }
+        }
+    }
+
+    // Use the same approach as C zstd's ZSTD_entropyCost / ZSTD_crossEntropyCost:
+    // For each symbol, estimate bits as count * log2(total / prob).
+    // We use a fixed-point approximation: cost_bits = count * (acc_log - log2(prob))
+    // where prob is the table's probability for that symbol.
+    //
+    // Scale factor: multiply by 256 for precision, divide at the end.
+    let mut cost_256: u64 = 0;
+
+    for sym in 0..=max_symbol as usize {
+        let count = counts[sym];
+        if count == 0 {
+            continue;
+        }
+        let prob = table.symbol_probability(sym as u8);
+        if prob == -1 {
+            // "Less than 1" probability — costs approximately acc_log bits per symbol
+            cost_256 += count as u64 * (acc_log as u64 * 256);
+        } else if prob > 0 {
+            // Normalized probability: prob out of table_size
+            // Bits per symbol ≈ log2(table_size / prob) = acc_log - log2(prob)
+            // Use the inverse probability table for precision
+            let norm = ((prob as u64 * 256) / table_size as u64) as usize;
+            let norm = norm.clamp(1, 255);
+            cost_256 += count as u64 * INVERSE_PROBABILITY_LOG256[norm] as u64;
+        }
+    }
+
+    // Round up to bits
+    (cost_256 as usize + 255) / 256
+}
+
+/// Lookup table: floor(-log2(x / 256) * 256) for x in 0..256.
+/// Index 0 is unused (would be infinity). Matches C zstd's kInverseProbabilityLog256.
+static INVERSE_PROBABILITY_LOG256: [u16; 256] = [
+    0, 2048, 1792, 1642, 1536, 1453, 1386, 1329, 1280, 1236, 1197, 1162, 1130, 1100, 1073, 1047,
+    1024, 1001, 980, 960, 941, 923, 906, 889, 874, 859, 844, 830, 817, 804, 791, 779, 768, 756,
+    745, 734, 724, 714, 704, 694, 685, 676, 667, 658, 650, 642, 633, 626, 618, 610, 603, 595,
+    588, 581, 574, 567, 561, 554, 548, 542, 535, 529, 523, 517, 512, 506, 500, 495, 489, 484,
+    478, 473, 468, 463, 458, 453, 448, 443, 438, 434, 429, 424, 420, 415, 411, 407, 402, 398,
+    394, 390, 386, 382, 377, 373, 370, 366, 362, 358, 354, 350, 347, 343, 339, 336, 332, 329,
+    325, 322, 318, 315, 311, 308, 305, 302, 298, 295, 292, 289, 286, 282, 279, 276, 273, 270,
+    267, 264, 261, 258, 256, 253, 250, 247, 244, 241, 239, 236, 233, 230, 228, 225, 222, 220,
+    217, 215, 212, 209, 207, 204, 202, 199, 197, 194, 192, 190, 187, 185, 182, 180, 178, 175,
+    173, 171, 168, 166, 164, 162, 159, 157, 155, 153, 151, 149, 146, 144, 142, 140, 138, 136,
+    134, 132, 130, 128, 126, 123, 121, 119, 117, 115, 114, 112, 110, 108, 106, 104, 102, 100,
+    98, 96, 94, 93, 91, 89, 87, 85, 83, 82, 80, 78, 76, 74, 73, 71, 69, 67, 66, 64, 62, 61,
+    59, 57, 55, 54, 52, 50, 49, 47, 46, 44, 42, 41, 39, 37, 36, 34, 33, 31, 30, 28, 26, 25,
+    23, 22, 20, 19, 17, 16, 14, 13, 11, 10, 8, 7, 5, 4, 2, 1,
+];
 
 fn encode_table(mode: &FseTableMode<'_>, writer: &mut BitWriter<&mut Vec<u8>>) {
     match mode {
@@ -328,7 +481,7 @@ pub fn encode_compressed_block<M: crate::encoding::Matcher>(
     let mut writer = BitWriter::from(output);
 
     // Literals section
-    if literals_vec.len() > 1024 {
+    if literals_vec.len() >= 32 {
         if let Some(table) =
             compress_literals(literals_vec, state.last_huff_table.as_ref(), &mut writer)
         {
@@ -377,14 +530,23 @@ pub fn encode_compressed_block<M: crate::encoding::Matcher>(
             of_mode.as_ref(),
         );
 
-        if let FseTableMode::Encoded(table) = ll_mode {
-            state.fse_tables.ll_previous = Some(table)
+        // Update previous tables: save a clone when using repeat-last so
+        // subsequent blocks can continue repeating. Encoded mode moves the
+        // newly built table into previous.
+        match ll_mode {
+            FseTableMode::Encoded(table) => state.fse_tables.ll_previous = Some(table),
+            FseTableMode::RepeateLast(t) => state.fse_tables.ll_previous = Some(t.clone()),
+            FseTableMode::Predefined(_) => state.fse_tables.ll_previous = None,
         }
-        if let FseTableMode::Encoded(table) = ml_mode {
-            state.fse_tables.ml_previous = Some(table)
+        match ml_mode {
+            FseTableMode::Encoded(table) => state.fse_tables.ml_previous = Some(table),
+            FseTableMode::RepeateLast(t) => state.fse_tables.ml_previous = Some(t.clone()),
+            FseTableMode::Predefined(_) => state.fse_tables.ml_previous = None,
         }
-        if let FseTableMode::Encoded(table) = of_mode {
-            state.fse_tables.of_previous = Some(table)
+        match of_mode {
+            FseTableMode::Encoded(table) => state.fse_tables.of_previous = Some(table),
+            FseTableMode::RepeateLast(t) => state.fse_tables.of_previous = Some(t.clone()),
+            FseTableMode::Predefined(_) => state.fse_tables.of_previous = None,
         }
     }
     writer.flush();
@@ -412,7 +574,7 @@ pub fn encode_compressed_block_standalone(
     let mut writer = BitWriter::from(output);
 
     // Literals section
-    if literals_vec.len() > 1024 {
+    if literals_vec.len() >= 32 {
         if let Some(_table) = compress_literals(literals_vec, None, &mut writer) {
             // Don't save table — this is standalone
         }
@@ -478,6 +640,27 @@ fn compress_literals(
     last_table: Option<&huff0_encoder::HuffmanTable>,
     writer: &mut BitWriter<&mut Vec<u8>>,
 ) -> Option<huff0_encoder::HuffmanTable> {
+    // Huffman coding requires at least 2 distinct symbols. For single-symbol
+    // data (e.g. all zeros), fall back to raw literals.
+    let distinct = {
+        let mut seen = [false; 256];
+        let mut count = 0u16;
+        for &b in literals {
+            if !seen[b as usize] {
+                seen[b as usize] = true;
+                count += 1;
+                if count >= 2 {
+                    break;
+                }
+            }
+        }
+        count
+    };
+    if distinct < 2 {
+        raw_literals(literals, writer);
+        return None;
+    }
+
     let reset_idx = writer.index();
 
     let new_encoder_table = huff0_encoder::HuffmanTable::build_from_data(literals);

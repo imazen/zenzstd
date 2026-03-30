@@ -144,6 +144,14 @@ impl FSETable {
         self.table_size.ilog2() as u8
     }
 
+    /// Returns the probability assigned to the given symbol in this table.
+    /// A probability of 0 means the symbol is not present.
+    /// A probability of -1 means "less than 1" (very rare symbol).
+    /// Positive values are the normalized count.
+    pub(crate) fn symbol_probability(&self, symbol: u8) -> i32 {
+        self.states[symbol as usize].probability
+    }
+
     pub(crate) fn write_table<V: AsMut<Vec<u8>>>(&self, writer: &mut BitWriter<V>) {
         writer.write_bits(self.acc_log() - 5, 4);
         let mut probability_counter = 0usize;
