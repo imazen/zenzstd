@@ -7,9 +7,13 @@ pub mod compress_params;
 pub(crate) mod frame_header;
 pub(crate) mod hash;
 pub(crate) mod match_generator;
+pub(crate) mod match_state;
 pub(crate) mod simd;
 pub(crate) mod util;
+pub(crate) mod zstd_fast;
+pub(crate) mod zstd_lazy;
 pub mod zstd_match;
+pub(crate) mod zstd_opt;
 
 mod frame_compressor;
 mod levels;
