@@ -6,7 +6,11 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 
 - `src/decoding/` — RFC 8878 compliant decompressor (from ruzstd, battle-tested 39M downloads)
 - `src/encoding/` — Full compressor with levels 1-22
-  - `zstd_match.rs` — Core match finder: Fast, DFast, Greedy, Lazy, Lazy2, BtLazy2, BtOpt/BtUltra/BtUltra2 strategies
+  - `match_state.rs` — Shared types (MatchState, RepCodes, CompressedBlock) and cross-block state (maps to zstd_compress_internal.h)
+  - `zstd_fast.rs` — Fast + DFast strategies with hash pipelining (maps to zstd_fast.c + zstd_double_fast.c)
+  - `zstd_lazy.rs` — Greedy/Lazy/Lazy2/BtLazy2 with nextToUpdate + BT match finder (maps to zstd_lazy.c)
+  - `zstd_opt.rs` — BtOpt/BtUltra/BtUltra2 optimal parsing (maps to zstd_opt.c)
+  - `zstd_match.rs` — Thin dispatch layer + tests + re-exports
   - `compress_params.rs` — All 4 zstd compression parameter tables (default/256K/128K/16K)
   - `hash.rs` — zstd hash functions (hash3-hash8 matching C primes)
   - `simd.rs` — AVX2 count_match (32B/iter via archmage incant!), 4-way histogram
@@ -53,6 +57,13 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 
 ## Known Issues
+
+### Cross-block L5/L7 regression on 1MB repetitive text
+L5/L7 produce 2662 bytes on 1MB text vs C's 148. The cross-block hash chain match finder
+doesn't find optimal matches when the window is much larger than the block. This needs
+absolute-position tracking across blocks (base_offset that increases per block) instead of
+the current concatenate-window-and-block approach. L9+ (Lazy2) work correctly because
+the deeper chain walk compensates.
 
 ### L16-22 compression ratio gap (zen/c = 1.17 on mixed_100KB)
 FSE table mode selection and Huffman literal threshold have been fixed:
