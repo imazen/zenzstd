@@ -93,81 +93,14 @@ fn decompress_literals(
         let stream4 = &source[jump3..];
 
         for stream in &[stream1, stream2, stream3, stream4] {
-            let mut decoder = HuffmanDecoder::new(&scratch.table);
-            let mut br = BitReaderReversed::new(stream);
-            //skip the 0 padding at the end of the last byte of the bit stream and throw away the first 1 found
-            let mut skipped_bits = 0;
-            loop {
-                let val = br.get_bits(1);
-                skipped_bits += 1;
-                if val == 1 || skipped_bits > 8 {
-                    break;
-                }
-            }
-            if skipped_bits > 8 {
-                //if more than 7 bits are 0, this is not the correct end of the bitstream. Either a bug or corrupted data
-                return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
-            }
-            decoder.init_state(&mut br);
-
-            let end_threshold = -(scratch.table.max_num_bits as isize);
-            // Decode in batches to reduce Vec growth overhead
-            let mut batch = [0u8; 64];
-            let mut batch_pos = 0;
-            while br.bits_remaining() > end_threshold {
-                batch[batch_pos] = decoder.decode_symbol();
-                batch_pos += 1;
-                decoder.next_state(&mut br);
-                if batch_pos == 64 {
-                    target.extend_from_slice(&batch);
-                    batch_pos = 0;
-                }
-            }
-            if batch_pos > 0 {
-                target.extend_from_slice(&batch[..batch_pos]);
-            }
-            if br.bits_remaining() != end_threshold {
-                return Err(DecompressLiteralsError::BitstreamReadMismatch {
-                    read_til: br.bits_remaining(),
-                    expected: end_threshold,
-                });
-            }
+            decode_huffman_stream(stream, &scratch.table, target)?;
         }
 
         bytes_read += source.len() as u32;
     } else {
         //just decode the one stream
         assert!(num_streams == 1);
-        let mut decoder = HuffmanDecoder::new(&scratch.table);
-        let mut br = BitReaderReversed::new(source);
-        let mut skipped_bits = 0;
-        loop {
-            let val = br.get_bits(1);
-            skipped_bits += 1;
-            if val == 1 || skipped_bits > 8 {
-                break;
-            }
-        }
-        if skipped_bits > 8 {
-            //if more than 7 bits are 0, this is not the correct end of the bitstream. Either a bug or corrupted data
-            return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
-        }
-        decoder.init_state(&mut br);
-        let end_threshold = -(scratch.table.max_num_bits as isize);
-        let mut batch = [0u8; 64];
-        let mut batch_pos = 0;
-        while br.bits_remaining() > end_threshold {
-            batch[batch_pos] = decoder.decode_symbol();
-            batch_pos += 1;
-            decoder.next_state(&mut br);
-            if batch_pos == 64 {
-                target.extend_from_slice(&batch);
-                batch_pos = 0;
-            }
-        }
-        if batch_pos > 0 {
-            target.extend_from_slice(&batch[..batch_pos]);
-        }
+        decode_huffman_stream(source, &scratch.table, target)?;
         bytes_read += source.len() as u32;
     }
 
@@ -179,4 +112,79 @@ fn decompress_literals(
     }
 
     Ok(bytes_read)
+}
+
+/// Decode a single Huffman bitstream, appending decoded bytes to `target`.
+///
+/// The decode loop is optimized with:
+/// - 2-symbol unrolled inner loop: decode two symbols per iteration to
+///   reduce loop overhead and allow the CPU to overlap the two independent
+///   table lookups and bit extractions.
+/// - Batch output: symbols are written to a fixed 128-byte buffer, then
+///   flushed to the target Vec in bulk, reducing push/extend overhead.
+#[inline(always)]
+fn decode_huffman_stream(
+    stream: &[u8],
+    table: &crate::huff0::HuffmanTable,
+    target: &mut Vec<u8>,
+) -> Result<(), DecompressLiteralsError> {
+    let mut decoder = HuffmanDecoder::new(table);
+    let mut br = BitReaderReversed::new(stream);
+
+    // Skip the 0 padding at the end of the last byte and throw away the first 1 found
+    let mut skipped_bits = 0;
+    loop {
+        let val = br.get_bits(1);
+        skipped_bits += 1;
+        if val == 1 || skipped_bits > 8 {
+            break;
+        }
+    }
+    if skipped_bits > 8 {
+        return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
+    }
+    decoder.init_state(&mut br);
+
+    let end_threshold = -(table.max_num_bits as isize);
+
+    // Decode in batches of 128 bytes. The 2x unrolled inner loop decodes
+    // two symbols per iteration, reducing branch overhead.
+    let mut batch = [0u8; 128];
+    let mut batch_pos = 0;
+
+    // 2-symbol unrolled loop: each iteration decodes 2 symbols.
+    // The second check uses (end_threshold - max_num_bits) because
+    // next_state may consume up to max_num_bits additional bits.
+    let double_threshold = end_threshold;
+    while br.bits_remaining() > double_threshold {
+        batch[batch_pos] = decoder.decode_symbol();
+        batch_pos += 1;
+        decoder.next_state(&mut br);
+
+        if br.bits_remaining() <= end_threshold {
+            break;
+        }
+
+        batch[batch_pos] = decoder.decode_symbol();
+        batch_pos += 1;
+        decoder.next_state(&mut br);
+
+        if batch_pos >= 126 {
+            target.extend_from_slice(&batch[..batch_pos]);
+            batch_pos = 0;
+        }
+    }
+
+    if batch_pos > 0 {
+        target.extend_from_slice(&batch[..batch_pos]);
+    }
+
+    if br.bits_remaining() != end_threshold {
+        return Err(DecompressLiteralsError::BitstreamReadMismatch {
+            read_til: br.bits_remaining(),
+            expected: end_threshold,
+        });
+    }
+
+    Ok(())
 }

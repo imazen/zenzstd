@@ -24,7 +24,9 @@ impl<'t> HuffmanDecoder<'t> {
     /// decoded literal.
     #[inline(always)]
     pub fn decode_symbol(&mut self) -> u8 {
-        self.table.decode[self.state as usize].symbol
+        // Table size is always power-of-2, mask state to help LLVM elide bounds check
+        let mask = self.table.decode.len() - 1;
+        self.table.decode[self.state as usize & mask].symbol
     }
 
     /// Initialize internal state and prepare to decode data. Then, `decode_symbol` can be called
@@ -41,16 +43,15 @@ impl<'t> HuffmanDecoder<'t> {
     /// to read from the new position.
     #[inline(always)]
     pub fn next_state(&mut self, br: &mut BitReaderReversed<'_>) -> u8 {
-        // self.state stores a small section, or a window of the bit stream. The table can be indexed via this state,
-        // telling you how many bits identify the current symbol.
-        let num_bits = self.table.decode[self.state as usize].num_bits;
+        // Table size is always power-of-2; mask guarantees in-bounds access,
+        // helping LLVM eliminate the bounds check entirely.
+        let table_mask = self.table.decode.len() - 1;
+        let entry = self.table.decode[self.state as usize & table_mask];
+        let num_bits = entry.num_bits;
         // New bits are read from the stream
         let new_bits = br.get_bits(num_bits);
         // Shift and mask out the bits that identify the current symbol
-        self.state <<= num_bits;
-        self.state &= self.table.decode.len() as u64 - 1;
-        // The new bits are appended at the end of the current state.
-        self.state |= new_bits;
+        self.state = ((self.state << num_bits) & table_mask as u64) | new_bits;
         num_bits
     }
 }

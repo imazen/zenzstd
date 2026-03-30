@@ -46,6 +46,7 @@ pub fn decode_sequences(
     }
 }
 
+#[allow(clippy::needless_range_loop)] // indexed loop intentional: seq_idx drives last-sequence branching
 fn decode_sequences_with_rle(
     section: &SequencesHeader,
     br: &mut BitReaderReversed<'_>,
@@ -66,40 +67,47 @@ fn decode_sequences_with_rle(
         ml_dec.init_state(br)?;
     }
 
+    let num_sequences = section.num_sequences as usize;
     target.clear();
-    target.reserve(section.num_sequences as usize);
+    target.resize(
+        num_sequences,
+        Sequence {
+            ll: 0,
+            ml: 0,
+            of: 0,
+        },
+    );
 
-    for _seq_idx in 0..section.num_sequences {
-        //get the codes from either the RLE byte or from the decoder
-        let ll_code = if scratch.ll_rle.is_some() {
-            scratch.ll_rle.unwrap()
-        } else {
-            ll_dec.decode_symbol()
+    let ll_rle = scratch.ll_rle;
+    let ml_rle = scratch.ml_rle;
+    let of_rle = scratch.of_rle;
+
+    for seq_idx in 0..num_sequences {
+        // Get the codes from either the RLE byte or from the fused decode+params
+        let (ll_code, ll_nbits) = match ll_rle {
+            Some(rle) => (rle, 0u8),
+            None => {
+                let (sym, nbits, _baseline) = ll_dec.decode_and_params();
+                (sym, nbits)
+            }
         };
-        let ml_code = if scratch.ml_rle.is_some() {
-            scratch.ml_rle.unwrap()
-        } else {
-            ml_dec.decode_symbol()
+        let (ml_code, ml_nbits) = match ml_rle {
+            Some(rle) => (rle, 0u8),
+            None => {
+                let (sym, nbits, _baseline) = ml_dec.decode_and_params();
+                (sym, nbits)
+            }
         };
-        let of_code = if scratch.of_rle.is_some() {
-            scratch.of_rle.unwrap()
-        } else {
-            of_dec.decode_symbol()
+        let (of_code, of_nbits) = match of_rle {
+            Some(rle) => (rle, 0u8),
+            None => {
+                let (sym, nbits, _baseline) = of_dec.decode_and_params();
+                (sym, nbits)
+            }
         };
 
-        let (ll_value, ll_num_bits) = lookup_ll_code(ll_code);
-        let (ml_value, ml_num_bits) = lookup_ml_code(ml_code);
-
-        //println!("Sequence: {}", i);
-        //println!("of stat: {}", of_dec.state);
-        //println!("of Code: {}", of_code);
-        //println!("ll stat: {}", ll_dec.state);
-        //println!("ll bits: {}", ll_num_bits);
-        //println!("ll Code: {}", ll_value);
-        //println!("ml stat: {}", ml_dec.state);
-        //println!("ml bits: {}", ml_num_bits);
-        //println!("ml Code: {}", ml_value);
-        //println!("");
+        let (ll_value, ll_extra_bits) = lookup_ll_code(ll_code);
+        let (ml_value, ml_extra_bits) = lookup_ml_code(ml_code);
 
         if of_code > MAX_OFFSET_CODE {
             return Err(DecodeSequenceError::UnsupportedOffset {
@@ -107,48 +115,57 @@ fn decode_sequences_with_rle(
             });
         }
 
-        let (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_num_bits, ll_num_bits);
+        let (obits, ml_add, ll_add);
+
+        if seq_idx + 1 < num_sequences {
+            let extra_sum = of_code + ml_extra_bits + ll_extra_bits;
+            let state_sum = ll_nbits + ml_nbits + of_nbits;
+            let total = extra_sum + state_sum;
+
+            let (ll_state_add, ml_state_add, of_state_add);
+
+            if total <= 56 {
+                if br.bits_consumed() + total > 64 {
+                    br.refill_unconditional();
+                }
+                obits = br.peek_and_advance(of_code);
+                ml_add = br.peek_and_advance(ml_extra_bits);
+                ll_add = br.peek_and_advance(ll_extra_bits);
+                ll_state_add = br.peek_and_advance(ll_nbits);
+                ml_state_add = br.peek_and_advance(ml_nbits);
+                of_state_add = br.peek_and_advance(of_nbits);
+            } else {
+                (obits, ml_add, ll_add) =
+                    br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+                (ll_state_add, ml_state_add, of_state_add) =
+                    br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
+            }
+
+            if ll_rle.is_none() {
+                ll_dec.apply_state_update(ll_state_add);
+            }
+            if ml_rle.is_none() {
+                ml_dec.apply_state_update(ml_state_add);
+            }
+            if of_rle.is_none() {
+                of_dec.apply_state_update(of_state_add);
+            }
+        } else {
+            (obits, ml_add, ll_add) =
+                br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+        }
+
         let offset = obits as u32 + (1u32 << of_code);
 
         if offset == 0 {
             return Err(DecodeSequenceError::ZeroOffset);
         }
 
-        target.push(Sequence {
+        target[seq_idx] = Sequence {
             ll: ll_value + ll_add as u32,
             ml: ml_value + ml_add as u32,
             of: offset,
-        });
-
-        if target.len() < section.num_sequences as usize {
-            // Batch non-RLE state updates
-            let ll_nbits = if scratch.ll_rle.is_none() {
-                ll_dec.state_update_params().0
-            } else {
-                0
-            };
-            let ml_nbits = if scratch.ml_rle.is_none() {
-                ml_dec.state_update_params().0
-            } else {
-                0
-            };
-            let of_nbits = if scratch.of_rle.is_none() {
-                of_dec.state_update_params().0
-            } else {
-                0
-            };
-
-            let (ll_add, ml_add_state, of_add) = br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
-            if scratch.ll_rle.is_none() {
-                ll_dec.apply_state_update(ll_add);
-            }
-            if scratch.ml_rle.is_none() {
-                ml_dec.apply_state_update(ml_add_state);
-            }
-            if scratch.of_rle.is_none() {
-                of_dec.apply_state_update(of_add);
-            }
-        }
+        };
 
         if br.bits_remaining() < 0 {
             return Err(DecodeSequenceError::NotEnoughBytesForNumSequences);
@@ -180,15 +197,50 @@ fn decode_sequences_without_rle(
 
     let num_sequences = section.num_sequences as usize;
     target.clear();
-    target.reserve(num_sequences);
+    // Pre-size the vec so we can write directly by index instead of pushing.
+    // This eliminates the capacity check on every iteration.
+    target.resize(
+        num_sequences,
+        Sequence {
+            ll: 0,
+            ml: 0,
+            of: 0,
+        },
+    );
 
+    decode_sequences_fast(br, &mut ll_dec, &mut ml_dec, &mut of_dec, target)
+}
+
+/// Core decode loop with single-refill-per-sequence optimization.
+///
+/// Each sequence needs at most ~45 bits (3 extra-bit reads + 3 state updates).
+/// With a 64-bit container and max 8 bits consumed before a refill, we can do
+/// one refill at the top of the loop and then extract all 6 values without any
+/// intermediate refill checks.
+///
+/// The loop also fuses symbol decoding with state-update parameter extraction
+/// using `decode_and_params()` to avoid redundant Entry reads.
+///
+/// The target slice is pre-sized by the caller; we write by index to avoid
+/// per-iteration capacity checks from Vec::push.
+#[inline(always)]
+#[allow(clippy::needless_range_loop)] // indexed loop intentional: seq_idx drives last-sequence branching
+fn decode_sequences_fast(
+    br: &mut BitReaderReversed<'_>,
+    ll_dec: &mut FSEDecoder<'_>,
+    ml_dec: &mut FSEDecoder<'_>,
+    of_dec: &mut FSEDecoder<'_>,
+    target: &mut [Sequence],
+) -> Result<(), DecodeSequenceError> {
+    let num_sequences = target.len();
     for seq_idx in 0..num_sequences {
-        let ll_code = ll_dec.decode_symbol();
-        let ml_code = ml_dec.decode_symbol();
-        let of_code = of_dec.decode_symbol();
+        // Fuse decode_symbol + state_update_params into one Entry read each.
+        let (of_code, of_nbits, _of_baseline) = of_dec.decode_and_params();
+        let (ml_code, ml_nbits, _ml_baseline) = ml_dec.decode_and_params();
+        let (ll_code, ll_nbits, _ll_baseline) = ll_dec.decode_and_params();
 
-        let (ll_value, ll_num_bits) = lookup_ll_code(ll_code);
-        let (ml_value, ml_num_bits) = lookup_ml_code(ml_code);
+        let (ll_value, ll_extra_bits) = lookup_ll_code(ll_code);
+        let (ml_value, ml_extra_bits) = lookup_ml_code(ml_code);
 
         if of_code > MAX_OFFSET_CODE {
             return Err(DecodeSequenceError::UnsupportedOffset {
@@ -196,32 +248,63 @@ fn decode_sequences_without_rle(
             });
         }
 
-        let (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_num_bits, ll_num_bits);
+        // Total bits needed: of_code + ml_extra_bits + ll_extra_bits for values,
+        // plus ll_nbits + ml_nbits + of_nbits for state updates.
+        // Max per zstd spec: of_code<=31, ml_extra<=16, ll_extra<=16, states<=9+9+8=26
+        // Worst case total: 31+16+16+26 = 89 bits > 56.
+        // So we need up to two refills: one for extra bits, one for state updates.
+        //
+        // Strategy: use get_bits_triple for the extra bits (which handles its own
+        // refill), then use get_bits_triple for the state updates.
+        // But we can often do it in a single refill if the total is <= 56.
+        let extra_sum = of_code + ml_extra_bits + ll_extra_bits;
+        let state_sum = ll_nbits + ml_nbits + of_nbits;
+
+        let (obits, ml_add, ll_add, ll_state_add, ml_state_add, of_state_add);
+
+        if seq_idx + 1 < num_sequences {
+            // Common case: both extra bits and state update bits fit in 56 total
+            let total = extra_sum + state_sum;
+            if total <= 56 {
+                // Single refill covers everything
+                if br.bits_consumed() + total > 64 {
+                    br.refill_unconditional();
+                }
+                // Extract all values without any further refill checks
+                obits = br.peek_and_advance(of_code);
+                ml_add = br.peek_and_advance(ml_extra_bits);
+                ll_add = br.peek_and_advance(ll_extra_bits);
+                ll_state_add = br.peek_and_advance(ll_nbits);
+                ml_state_add = br.peek_and_advance(ml_nbits);
+                of_state_add = br.peek_and_advance(of_nbits);
+            } else {
+                // Need two refills: one for extra bits, one for state updates
+                (obits, ml_add, ll_add) =
+                    br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+                (ll_state_add, ml_state_add, of_state_add) =
+                    br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
+            }
+
+            ll_dec.apply_state_update(ll_state_add);
+            ml_dec.apply_state_update(ml_state_add);
+            of_dec.apply_state_update(of_state_add);
+        } else {
+            // Last sequence: no state update needed
+            (obits, ml_add, ll_add) =
+                br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+        }
+
         let offset = obits as u32 + (1u32 << of_code);
 
         if offset == 0 {
             return Err(DecodeSequenceError::ZeroOffset);
         }
 
-        target.push(Sequence {
+        target[seq_idx] = Sequence {
             ll: ll_value + ll_add as u32,
             ml: ml_value + ml_add as u32,
             of: offset,
-        });
-
-        if seq_idx + 1 < num_sequences {
-            // Batch the three FSE state updates into a single triple-read
-            // to minimize refill calls. Each update needs state.num_bits
-            // bits from the bitstream.
-            let (ll_nbits, _) = ll_dec.state_update_params();
-            let (ml_nbits, _) = ml_dec.state_update_params();
-            let (of_nbits, _) = of_dec.state_update_params();
-
-            let (ll_add, ml_add_state, of_add) = br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
-            ll_dec.apply_state_update(ll_add);
-            ml_dec.apply_state_update(ml_add_state);
-            of_dec.apply_state_update(of_add);
-        }
+        };
 
         if br.bits_remaining() < 0 {
             return Err(DecodeSequenceError::NotEnoughBytesForNumSequences);

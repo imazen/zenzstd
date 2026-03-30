@@ -35,7 +35,8 @@ impl<'t> FSEDecoder<'t> {
             return Err(FSEDecoderError::TableIsUninitialized);
         }
         let new_state = bits.get_bits(self.table.accuracy_log);
-        self.state = self.table.decode[new_state as usize];
+        let table_mask = self.table.decode.len() - 1;
+        self.state = self.table.decode[new_state as usize & table_mask];
 
         Ok(())
     }
@@ -47,11 +48,13 @@ impl<'t> FSEDecoder<'t> {
         let add = bits.get_bits(num_bits);
         let base_line = self.state.base_line;
         let new_state = base_line + add as u32;
-        self.state = self.table.decode[new_state as usize];
+        let table_mask = self.table.decode.len() - 1;
+        self.state = self.table.decode[new_state as usize & table_mask];
     }
 
     /// Read the number of bits needed for the state update and return (num_bits, base_line).
     /// The caller can batch the bit reads.
+    #[allow(dead_code)] // kept for public API / fuzz harness compatibility
     #[inline(always)]
     pub fn state_update_params(&self) -> (u8, u32) {
         (self.state.num_bits, self.state.base_line)
@@ -62,7 +65,18 @@ impl<'t> FSEDecoder<'t> {
     #[inline(always)]
     pub fn apply_state_update(&mut self, add: u64) {
         let new_state = self.state.base_line + add as u32;
-        self.state = self.table.decode[new_state as usize];
+        // Table size is always (1 << accuracy_log), a power of 2.
+        // Masking helps LLVM prove the index is in-bounds and elide the bounds check.
+        let table_mask = self.table.decode.len() - 1;
+        self.state = self.table.decode[new_state as usize & table_mask];
+    }
+
+    /// Combined decode + state-update-params: returns (symbol, num_bits_for_update, baseline).
+    /// Avoids redundant Entry field loads by doing both operations from the same cached state.
+    #[inline(always)]
+    pub fn decode_and_params(&self) -> (u8, u8, u32) {
+        let entry = self.state;
+        (entry.symbol, entry.num_bits, entry.base_line)
     }
 }
 

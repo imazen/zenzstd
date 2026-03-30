@@ -28,6 +28,13 @@ impl<'s> BitReaderReversed<'s> {
         self.index as isize * 8 + (64 - self.bits_consumed as isize) - self.extra_bits as isize
     }
 
+    /// How many bits have been consumed from the current 64-bit container.
+    /// Used to check whether a refill is needed before a batch of peek_and_advance calls.
+    #[inline(always)]
+    pub fn bits_consumed(&self) -> u8 {
+        self.bits_consumed
+    }
+
     pub fn new(source: &'s [u8]) -> BitReaderReversed<'s> {
         BitReaderReversed {
             index: source.len(),
@@ -52,8 +59,35 @@ impl<'s> BitReaderReversed<'s> {
             // Fast path: plenty of source remaining. This is the common case.
             self.index -= bytes_consumed;
             self.bits_consumed &= 7;
-            self.bit_container =
-                u64::from_le_bytes((&self.source[self.index..][..8]).try_into().unwrap());
+            // Fixed-array cast: convert the slice to &[u8; 8] to eliminate
+            // interior bounds checks. The bounds are validated once by the
+            // slice operation, then the try_into gives LLVM proof that all
+            // 8 bytes are in-bounds.
+            let chunk: &[u8; 8] = self.source[self.index..][..8].try_into().unwrap();
+            self.bit_container = u64::from_le_bytes(*chunk);
+        } else {
+            self.refill_slow();
+        }
+    }
+
+    /// Refill unconditionally, pulling up to 7 fresh bytes into the container.
+    /// This is the "always refill" variant used by the fused sequence decoder
+    /// to guarantee enough bits are available for a full triple of FSE state
+    /// updates + extra bit reads without intermediate refill checks.
+    ///
+    /// After this call, at least 56 bits are available (assuming source has
+    /// enough data).
+    #[inline(always)]
+    pub fn refill_unconditional(&mut self) {
+        // Compute how many bytes we've consumed since last refill
+        let bytes_consumed = self.bits_consumed as usize / 8;
+        // Even if bytes_consumed == 0, the rest is harmless
+
+        if self.index >= bytes_consumed {
+            self.index -= bytes_consumed;
+            self.bits_consumed &= 7;
+            let chunk: &[u8; 8] = self.source[self.index..][..8].try_into().unwrap();
+            self.bit_container = u64::from_le_bytes(*chunk);
         } else {
             self.refill_slow();
         }
@@ -66,7 +100,8 @@ impl<'s> BitReaderReversed<'s> {
         if self.index > 0 {
             // Read the last portion of source into the `bit_container`
             if self.source.len() >= 8 {
-                self.bit_container = u64::from_le_bytes((&self.source[..8]).try_into().unwrap());
+                let chunk: &[u8; 8] = self.source[..8].try_into().unwrap();
+                self.bit_container = u64::from_le_bytes(*chunk);
             } else {
                 let mut value = [0; 8];
                 value[..self.source.len()].copy_from_slice(self.source);
@@ -172,6 +207,24 @@ impl<'s> BitReaderReversed<'s> {
 
         (self.get_bits(n1), self.get_bits(n2), self.get_bits(n3))
     }
+
+    /// Peek at the next `n` bits and advance, WITHOUT checking whether enough
+    /// bits are available. The caller must guarantee that at least `n` bits
+    /// remain in the container (i.e., `bits_consumed + n <= 64`).
+    ///
+    /// This is the building block for the "single refill per sequence" pattern:
+    /// refill once, then extract multiple values with `peek_and_advance`.
+    #[inline(always)]
+    pub fn peek_and_advance(&mut self, n: u8) -> u64 {
+        if n == 0 {
+            return 0;
+        }
+        let shift_by = 64 - self.bits_consumed - n;
+        let mask = (1u64 << n) - 1u64;
+        let value = (self.bit_container >> shift_by) & mask;
+        self.bits_consumed += n;
+        value
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +245,45 @@ mod test {
         // All zeroes filled in
         assert_eq!(br.get_bits(4), 0b0000);
         assert_eq!(br.bits_remaining(), -7);
+    }
+
+    #[test]
+    fn peek_and_advance_matches_get_bits() {
+        // Verify that peek_and_advance produces the same results as get_bits
+        // when the container is adequately filled.
+        let data: [u8; 16] = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB,
+            0xCD, 0xEF,
+        ];
+
+        // Use get_bits (the reference)
+        let mut br1 = super::BitReaderReversed::new(&data);
+        let a1 = br1.get_bits(5);
+        let a2 = br1.get_bits(8);
+        let a3 = br1.get_bits(13);
+
+        // Use refill_unconditional + peek_and_advance
+        let mut br2 = super::BitReaderReversed::new(&data);
+        br2.refill_unconditional();
+        let b1 = br2.peek_and_advance(5);
+        let b2 = br2.peek_and_advance(8);
+        let b3 = br2.peek_and_advance(13);
+
+        assert_eq!(a1, b1);
+        assert_eq!(a2, b2);
+        assert_eq!(a3, b3);
+        assert_eq!(br1.bits_remaining(), br2.bits_remaining());
+    }
+
+    #[test]
+    fn refill_unconditional_basic() {
+        let data = [0xFF; 16];
+        let mut br = super::BitReaderReversed::new(&data);
+        // Initial state: all 64 bits consumed, need refill
+        br.refill_unconditional();
+        // Should now have 64 bits available
+        assert!(br.bits_remaining() >= 56);
+        let val = br.peek_and_advance(8);
+        assert_eq!(val, 0xFF);
     }
 }
