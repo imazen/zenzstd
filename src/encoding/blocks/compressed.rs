@@ -4,7 +4,7 @@ use crate::{
     bit_io::BitWriter,
     encoding::frame_compressor::CompressState,
     encoding::{Matcher, Sequence},
-    fse::fse_encoder::{build_table_from_data, FSETable, State},
+    fse::fse_encoder::{FSETable, State, build_table_from_data},
     huff0::huff0_encoder,
 };
 

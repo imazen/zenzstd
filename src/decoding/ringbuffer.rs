@@ -226,7 +226,11 @@ impl RingBuffer {
     /// Safe version retained for API compatibility. Despite the name "unchecked",
     /// this is fully safe. Allows start + len > self.len() for repeat/overlap patterns.
     pub fn extend_from_within_unchecked(&mut self, start: usize, len: usize) {
-        debug_assert!(start <= self.len(), "start ({start}) > len ({})", self.len());
+        debug_assert!(
+            start <= self.len(),
+            "start ({start}) > len ({})",
+            self.len()
+        );
         self.reserve(len);
         self.do_extend_from_within(start, len);
     }

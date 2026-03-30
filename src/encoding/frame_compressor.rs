@@ -560,7 +560,9 @@ mod tests {
         };
         decoder.add_dict(decoding_dict).unwrap();
         let mut decoded = Vec::with_capacity(data.len() + 1024);
-        decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
+        decoder
+            .decode_all_to_vec(&compressed, &mut decoded)
+            .unwrap();
         assert_eq!(decoded, data, "our decoder: dictionary roundtrip failed");
     }
 
@@ -601,7 +603,10 @@ mod tests {
             .decompress(&compressed, 1 << 20)
             .expect("C zstd failed to decompress with dictionary");
 
-        assert_eq!(decompressed, data, "C zstd: dictionary decompression mismatch");
+        assert_eq!(
+            decompressed, data,
+            "C zstd: dictionary decompression mismatch"
+        );
     }
 
     #[test]
@@ -615,14 +620,18 @@ mod tests {
         }
 
         let compressed_with = crate::encoding::compress_to_vec_with_dict(
-            data.as_slice(), super::CompressionLevel::Default, &dict);
-        let compressed_without = crate::encoding::compress_to_vec(
-            data.as_slice(), super::CompressionLevel::Default);
+            data.as_slice(),
+            super::CompressionLevel::Default,
+            &dict,
+        );
+        let compressed_without =
+            crate::encoding::compress_to_vec(data.as_slice(), super::CompressionLevel::Default);
 
         assert!(
             compressed_with.len() <= compressed_without.len(),
             "dict should not be worse: with={}, without={}",
-            compressed_with.len(), compressed_without.len(),
+            compressed_with.len(),
+            compressed_without.len(),
         );
     }
 
@@ -644,8 +653,8 @@ mod tests {
             super::CompressionLevel::Level(5),
             super::CompressionLevel::Level(9),
         ] {
-            let compressed = crate::encoding::compress_to_vec_with_dict(
-                data.as_slice(), level, &dict);
+            let compressed =
+                crate::encoding::compress_to_vec_with_dict(data.as_slice(), level, &dict);
             let mut decoder = FrameDecoder::new();
             let decoding_dict = crate::decoding::dictionary::Dictionary {
                 id: 1,
@@ -656,8 +665,13 @@ mod tests {
             };
             decoder.add_dict(decoding_dict).unwrap();
             let mut decoded = Vec::with_capacity(data.len() + 1024);
-            decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
-            assert_eq!(decoded, data, "dictionary roundtrip failed at level {level:?}");
+            decoder
+                .decode_all_to_vec(&compressed, &mut decoded)
+                .unwrap();
+            assert_eq!(
+                decoded, data,
+                "dictionary roundtrip failed at level {level:?}"
+            );
         }
     }
 
@@ -666,9 +680,16 @@ mod tests {
         let dict = make_raw_dict(123, &[1, 2, 3, 4, 5, 6, 7, 8]);
         let data = vec![0u8; 100];
         let compressed = crate::encoding::compress_to_vec_with_dict(
-            data.as_slice(), super::CompressionLevel::Default, &dict);
+            data.as_slice(),
+            super::CompressionLevel::Default,
+            &dict,
+        );
         let (header, _) = crate::decoding::frame::read_frame_header(compressed.as_slice()).unwrap();
-        assert_eq!(header.dictionary_id(), Some(123), "frame header should contain dictionary ID 123");
+        assert_eq!(
+            header.dictionary_id(),
+            Some(123),
+            "frame header should contain dictionary ID 123"
+        );
     }
 
     #[test]
@@ -676,7 +697,10 @@ mod tests {
         let dict = make_raw_dict(1, &make_test_dict_content());
         let data: &[u8] = &[];
         let compressed = crate::encoding::compress_to_vec_with_dict(
-            data, super::CompressionLevel::Default, &dict);
+            data,
+            super::CompressionLevel::Default,
+            &dict,
+        );
         let mut decoder = FrameDecoder::new();
         let decoding_dict = crate::decoding::dictionary::Dictionary {
             id: 1,
@@ -687,7 +711,9 @@ mod tests {
         };
         decoder.add_dict(decoding_dict).unwrap();
         let mut decoded = Vec::with_capacity(1024);
-        decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
+        decoder
+            .decode_all_to_vec(&compressed, &mut decoded)
+            .unwrap();
         assert!(decoded.is_empty());
     }
 

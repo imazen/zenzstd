@@ -74,7 +74,10 @@ pub fn compress_level<M: Matcher>(
             Some(dict) if !dict.is_empty() => {
                 let rep = dict_rep_offsets.as_ref().unwrap_or(&[1, 4, 8]);
                 super::super::zstd_match::compress_block_zstd_with_dict(
-                    uncompressed_data, &params, dict, rep,
+                    uncompressed_data,
+                    &params,
+                    dict,
+                    rep,
                 )
             }
             _ => compress_block_zstd(uncompressed_data, &params),

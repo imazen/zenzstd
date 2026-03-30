@@ -24,7 +24,8 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 - `#![no_std]` with alloc — std is optional
 - Safe ringbuffer using Vec<u8> with power-of-2 capacity bitmask
 - BT* strategies (levels 13-22) use a binary tree match finder (DUBT-style)
-- BtLazy2 uses binary tree + lazy2 evaluation; BtOpt/BtUltra/BtUltra2 use greedy selection (optimal parsing is a future enhancement)
+- BtLazy2 uses binary tree + lazy2 evaluation
+- BtOpt/BtUltra/BtUltra2 use price-based optimal parsing (forward price table + backward trace, following C zstd's `ZSTD_compressBlock_opt_generic`)
 - Multi-block encoder has a known bug at levels >= 3 with non-trivial patterns
 
 ## Known Bugs

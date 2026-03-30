@@ -29,7 +29,8 @@ pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
             offset += 32;
         }
 
-        h64 = v1.rotate_left(1)
+        h64 = v1
+            .rotate_left(1)
             .wrapping_add(v2.rotate_left(7))
             .wrapping_add(v3.rotate_left(12))
             .wrapping_add(v4.rotate_left(18));
@@ -58,14 +59,20 @@ fn finalize_remaining(mut h64: u64, data: &[u8], total_len: u64) -> u64 {
     while offset + 8 <= data.len() {
         let k1 = round(0, read_u64_le(&data[offset..]));
         h64 ^= k1;
-        h64 = h64.rotate_left(27).wrapping_mul(PRIME64_1).wrapping_add(PRIME64_4);
+        h64 = h64
+            .rotate_left(27)
+            .wrapping_mul(PRIME64_1)
+            .wrapping_add(PRIME64_4);
         offset += 8;
     }
 
     if offset + 4 <= data.len() {
         let k1 = u64::from(read_u32_le(&data[offset..]));
         h64 ^= k1.wrapping_mul(PRIME64_1);
-        h64 = h64.rotate_left(23).wrapping_mul(PRIME64_2).wrapping_add(PRIME64_3);
+        h64 = h64
+            .rotate_left(23)
+            .wrapping_mul(PRIME64_2)
+            .wrapping_add(PRIME64_3);
         offset += 4;
     }
 
@@ -184,7 +191,9 @@ impl XxHash64 {
         let mut h64: u64;
 
         if self.total_len >= 32 {
-            h64 = self.v1.rotate_left(1)
+            h64 = self
+                .v1
+                .rotate_left(1)
                 .wrapping_add(self.v2.rotate_left(7))
                 .wrapping_add(self.v3.rotate_left(12))
                 .wrapping_add(self.v4.rotate_left(18));
@@ -209,8 +218,8 @@ impl XxHash64 {
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use alloc::vec::Vec;
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn test_empty() {

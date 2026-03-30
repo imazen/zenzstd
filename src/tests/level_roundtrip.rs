@@ -100,8 +100,10 @@ fn test_compression_actually_compresses() {
         data.extend_from_slice(b"Hello World! This is a test of the zstd compression. ");
     }
     for level in [1, 3, 7, 11] {
-        let compressed =
-            crate::encoding::compress_to_vec(data.as_slice(), crate::encoding::CompressionLevel::Level(level));
+        let compressed = crate::encoding::compress_to_vec(
+            data.as_slice(),
+            crate::encoding::CompressionLevel::Level(level),
+        );
         assert!(
             compressed.len() < data.len(),
             "Level {} failed to compress: {} -> {} bytes",
@@ -141,7 +143,8 @@ fn test_large_match_length_c_zstd() {
             );
         });
         assert_eq!(
-            data, decoded,
+            data,
+            decoded,
             "C zstd: data mismatch at {} repeats ({} bytes)",
             repeats,
             data.len()
@@ -166,7 +169,8 @@ fn test_multiblock_all_levels() {
         let mut decoded = Vec::new();
         zstd::stream::copy_decode(compressed.as_slice(), &mut decoded).unwrap();
         assert_eq!(
-            data, decoded,
+            data,
+            decoded,
             "Level 1 failed at {} repeats ({} bytes, compressed {} bytes)",
             repeats,
             data.len(),
@@ -194,13 +198,20 @@ fn test_multiblock_all_levels() {
             Ok(()) => {
                 if data != our_decoded {
                     // Find first mismatch
-                    let mismatch = data.iter().zip(our_decoded.iter())
+                    let mismatch = data
+                        .iter()
+                        .zip(our_decoded.iter())
                         .position(|(a, b)| a != b)
                         .unwrap_or(data.len().min(our_decoded.len()));
                     panic!(
                         "Multi-block round-trip failed (our decoder) at level {}: first mismatch at byte {} (of {}). \
                          Input {} bytes, compressed {} bytes, decoded {} bytes",
-                        level, mismatch, data.len(), data.len(), compressed.len(), our_decoded.len(),
+                        level,
+                        mismatch,
+                        data.len(),
+                        data.len(),
+                        compressed.len(),
+                        our_decoded.len(),
                     );
                 }
             }
@@ -214,7 +225,8 @@ fn test_multiblock_all_levels() {
         match zstd::stream::copy_decode(compressed.as_slice(), &mut decoded) {
             Ok(()) => {
                 assert_eq!(
-                    data, decoded,
+                    data,
+                    decoded,
                     "Multi-block round-trip failed (C zstd) at level {} ({} -> {} bytes)",
                     level,
                     data.len(),
@@ -297,15 +309,22 @@ fn test_cross_block_history_roundtrip() {
         // Decode with our decoder
         let mut decoder = crate::decoding::FrameDecoder::new();
         let mut decoded = Vec::with_capacity(data.len() + 4096);
-        decoder.decode_all_to_vec(&compressed, &mut decoded)
+        decoder
+            .decode_all_to_vec(&compressed, &mut decoded)
             .unwrap_or_else(|e| panic!("Our decoder failed at level {level}: {e:?}"));
-        assert_eq!(data, decoded, "our decoder: cross-block mismatch at level {level}");
+        assert_eq!(
+            data, decoded,
+            "our decoder: cross-block mismatch at level {level}"
+        );
 
         // Decode with C zstd
         let mut decoded_c = Vec::new();
         match zstd::stream::copy_decode(compressed.as_slice(), &mut decoded_c) {
             Ok(()) => {
-                assert_eq!(data, decoded_c, "C zstd: cross-block mismatch at level {level}");
+                assert_eq!(
+                    data, decoded_c,
+                    "C zstd: cross-block mismatch at level {level}"
+                );
             }
             Err(e) => {
                 let err_str = std::format!("{e:?}");
@@ -340,13 +359,12 @@ fn test_cross_block_history_improves_ratio() {
 
     // Verify it decodes correctly
     let mut decoded = Vec::new();
-    zstd::stream::copy_decode(compressed.as_slice(), &mut decoded)
-        .unwrap_or_else(|e| {
-            let err_str = std::format!("{e:?}");
-            if !err_str.contains("checksum") {
-                panic!("C zstd decode failed: {e}");
-            }
-        });
+    zstd::stream::copy_decode(compressed.as_slice(), &mut decoded).unwrap_or_else(|e| {
+        let err_str = std::format!("{e:?}");
+        if !err_str.contains("checksum") {
+            panic!("C zstd decode failed: {e}");
+        }
+    });
     if !decoded.is_empty() {
         assert_eq!(data, decoded);
     }
@@ -358,7 +376,8 @@ fn test_cross_block_history_improves_ratio() {
         ratio > 10.0,
         "expected high compression ratio for repetitive multi-block data, got {ratio:.1}x \
          ({} -> {} bytes)",
-        data.len(), compressed.len(),
+        data.len(),
+        compressed.len(),
     );
 }
 
@@ -390,7 +409,9 @@ fn test_cross_block_streaming_roundtrip() {
     // Verify with our decoder
     let mut decoder = crate::decoding::FrameDecoder::new();
     let mut decoded = Vec::with_capacity(data.len() + 4096);
-    decoder.decode_all_to_vec(&compressed, &mut decoded).unwrap();
+    decoder
+        .decode_all_to_vec(&compressed, &mut decoded)
+        .unwrap();
     assert_eq!(data, decoded, "streaming cross-block roundtrip failed");
 
     // Verify with C zstd
