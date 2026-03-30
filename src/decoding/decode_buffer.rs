@@ -1,11 +1,11 @@
 use crate::io::{Error, Read, Write};
 use alloc::vec::Vec;
 
-use super::ringbuffer::RingBuffer;
+use super::flat_buffer::FlatBuffer;
 use crate::decoding::errors::DecodeBufferError;
 
 pub struct DecodeBuffer {
-    buffer: RingBuffer,
+    buffer: FlatBuffer,
     pub dict_content: Vec<u8>,
 
     pub window_size: usize,
@@ -31,8 +31,10 @@ impl Read for DecodeBuffer {
 
 impl DecodeBuffer {
     pub fn new(window_size: usize) -> DecodeBuffer {
+        let mut buffer = FlatBuffer::new();
+        buffer.set_window_size(window_size);
         DecodeBuffer {
-            buffer: RingBuffer::new(),
+            buffer,
             dict_content: Vec::new(),
             window_size,
             total_output_counter: 0,
@@ -44,6 +46,7 @@ impl DecodeBuffer {
     pub fn reset(&mut self, window_size: usize) {
         self.window_size = window_size;
         self.buffer.clear();
+        self.buffer.set_window_size(window_size);
         self.buffer.reserve(self.window_size);
         self.dict_content.clear();
         self.total_output_counter = 0;
@@ -236,7 +239,7 @@ impl DecodeBuffer {
         }
 
         struct DrainGuard<'a> {
-            buffer: &'a mut RingBuffer,
+            buffer: &'a mut FlatBuffer,
             amount: usize,
         }
 
