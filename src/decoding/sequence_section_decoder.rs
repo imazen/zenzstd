@@ -10,6 +10,9 @@ use crate::decoding::errors::{DecodeSequenceError, DecompressBlockError, Execute
 use crate::fse::FSEDecoder;
 use alloc::vec::Vec;
 
+#[cfg(feature = "simd")]
+use archmage::prelude::*;
+
 /// Decode the provided source as a series of sequences into the supplied `target`.
 /// This is the old two-pass decode path, kept as a fallback for testing/validation.
 /// The fused decode_and_execute_sequences is used by default.
@@ -641,20 +644,28 @@ pub fn decode_and_execute_sequences(
     if fse.ll_rle.is_some() || fse.ml_rle.is_some() || fse.of_rle.is_some() {
         fused_decode_execute_rle_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer)
     } else {
-        fused_decode_execute_fast_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer)
+        // When `simd` feature is enabled, dispatch to the best available ISA variant
+        // via incant!. This compiles the fused loop with target_feature=+avx2,+bmi2
+        // on supporting CPUs, giving LLVM access to TZCNT, PDEP/PEXT, and wider copies.
+        #[cfg(feature = "simd")]
+        {
+            archmage::incant!(fused_decode_execute_fast_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer))
+        }
+        #[cfg(not(feature = "simd"))]
+        {
+            fused_decode_execute_fast_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer)
+        }
     }
 }
 
 /// Fused decode+execute for the common case (no RLE modes).
 ///
-/// Hot state (pos, total_output_counter, offset history) is hoisted to stack locals
-/// to eliminate indirect stores through DecodeBuffer -> FlatBuffer on every sequence.
-/// The profile shows 44% of this function's time is a single store instruction writing
-/// `FlatBuffer::pos` through the struct indirection — hoisting it to a register
-/// eliminates that L1 cache miss.
-///
-/// The struct fields are written back once at the end (or on error/dict-path exit).
-#[inline(always)]
+/// Hot state (pos, total_output_counter, offset history) is hoisted to stack locals.
+/// When the `simd` feature is enabled, `#[autoversion]` generates per-ISA variants
+/// (scalar, SSE4.2, AVX2+BMI2) so the compiler can use TZCNT, BMI2 bit extraction,
+/// and wider memory operations in the hot loop.
+#[cfg_attr(feature = "simd", archmage::autoversion)]
+#[cfg_attr(not(feature = "simd"), inline(always))]
 #[allow(clippy::needless_range_loop)]
 #[allow(clippy::too_many_arguments)]
 fn fused_decode_execute_fast_inner(
