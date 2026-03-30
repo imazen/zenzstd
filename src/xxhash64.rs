@@ -22,10 +22,12 @@ pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
 
         let mut offset = 0;
         while offset + 32 <= data.len() {
-            v1 = round(v1, read_u64_le(&data[offset..]));
-            v2 = round(v2, read_u64_le(&data[offset + 8..]));
-            v3 = round(v3, read_u64_le(&data[offset + 16..]));
-            v4 = round(v4, read_u64_le(&data[offset + 24..]));
+            // Fixed-size array cast eliminates interior bounds checks.
+            let chunk: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
+            v1 = round(v1, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[0..8]).unwrap()));
+            v2 = round(v2, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[8..16]).unwrap()));
+            v3 = round(v3, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[16..24]).unwrap()));
+            v4 = round(v4, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[24..32]).unwrap()));
             offset += 32;
         }
 
@@ -147,6 +149,7 @@ impl XxHash64 {
     }
 
     /// Feed data into the hasher.
+    #[inline]
     pub fn write(&mut self, data: &[u8]) {
         self.total_len += data.len() as u64;
         let mut offset = 0;
@@ -160,21 +163,23 @@ impl XxHash64 {
             offset += take;
 
             if self.buf_len == 32 {
-                let buf = self.buf;
-                self.v1 = round(self.v1, read_u64_le(&buf));
-                self.v2 = round(self.v2, read_u64_le(&buf[8..]));
-                self.v3 = round(self.v3, read_u64_le(&buf[16..]));
-                self.v4 = round(self.v4, read_u64_le(&buf[24..]));
+                // buf is [u8; 32] — zero bounds checks with fixed-size reads
+                let b = &self.buf;
+                self.v1 = round(self.v1, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[0..8]).unwrap()));
+                self.v2 = round(self.v2, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[8..16]).unwrap()));
+                self.v3 = round(self.v3, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[16..24]).unwrap()));
+                self.v4 = round(self.v4, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[24..32]).unwrap()));
                 self.buf_len = 0;
             }
         }
 
         // Process 32-byte chunks
         while offset + 32 <= data.len() {
-            self.v1 = round(self.v1, read_u64_le(&data[offset..]));
-            self.v2 = round(self.v2, read_u64_le(&data[offset + 8..]));
-            self.v3 = round(self.v3, read_u64_le(&data[offset + 16..]));
-            self.v4 = round(self.v4, read_u64_le(&data[offset + 24..]));
+            let chunk: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
+            self.v1 = round(self.v1, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[0..8]).unwrap()));
+            self.v2 = round(self.v2, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[8..16]).unwrap()));
+            self.v3 = round(self.v3, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[16..24]).unwrap()));
+            self.v4 = round(self.v4, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[24..32]).unwrap()));
             offset += 32;
         }
 
