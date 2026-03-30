@@ -298,53 +298,88 @@ fn encode_sequences(
     ml_table: &FSETable,
     of_table: &FSETable,
 ) {
+    // Pre-compute table size logs once (avoids per-iteration ilog2)
+    let ml_log = ml_table.table_size.ilog2() as usize;
+    let of_log = of_table.table_size.ilog2() as usize;
+    let ll_log = ll_table.table_size.ilog2() as usize;
+
     let sequence = sequences[sequences.len() - 1];
-    let (ll_code, ll_add_bits, ll_num_bits) = encode_literal_length(sequence.ll);
+    let (ll_code, ll_add_bits, ll_num_bits) = encode_literal_length_fast(sequence.ll);
     let (of_code, of_add_bits, of_num_bits) = encode_offset(sequence.of);
-    let (ml_code, ml_add_bits, ml_num_bits) = encode_match_len(sequence.ml);
+    let (ml_code, ml_add_bits, ml_num_bits) = encode_match_len_fast(sequence.ml);
     let mut ll_state: &State = ll_table.start_state(ll_code);
     let mut ml_state: &State = ml_table.start_state(ml_code);
     let mut of_state: &State = of_table.start_state(of_code);
 
-    writer.write_bits(ll_add_bits, ll_num_bits);
-    writer.write_bits(ml_add_bits, ml_num_bits);
-    writer.write_bits(of_add_bits, of_num_bits);
+    // Batch the 3 initial extra-bit writes into one call.
+    // Max total: LL=16 + ML=16 + OF=31 = 63 bits, fits in u64.
+    {
+        let mut bits: u64 = ll_add_bits as u64;
+        let mut nbits: usize = ll_num_bits;
+        bits |= (ml_add_bits as u64) << nbits;
+        nbits += ml_num_bits;
+        bits |= (of_add_bits as u64) << nbits;
+        nbits += of_num_bits;
+        if nbits > 0 {
+            writer.write_bits_64(bits, nbits);
+        }
+    }
 
     // encode backwards so the decoder reads the first sequence first
     if sequences.len() > 1 {
-        for sequence in (0..=sequences.len() - 2).rev() {
-            let sequence = sequences[sequence];
-            let (ll_code, ll_add_bits, ll_num_bits) = encode_literal_length(sequence.ll);
+        for idx in (0..=sequences.len() - 2).rev() {
+            let sequence = sequences[idx];
+            let (ll_code, ll_add_bits, ll_num_bits) = encode_literal_length_fast(sequence.ll);
             let (of_code, of_add_bits, of_num_bits) = encode_offset(sequence.of);
-            let (ml_code, ml_add_bits, ml_num_bits) = encode_match_len(sequence.ml);
+            let (ml_code, ml_add_bits, ml_num_bits) = encode_match_len_fast(sequence.ml);
 
+            let of_next = of_table.next_state(of_code, of_state.index);
+            let of_diff = of_state.index - of_next.baseline;
+            let ml_next = ml_table.next_state(ml_code, ml_state.index);
+            let ml_diff = ml_state.index - ml_next.baseline;
+            let ll_next = ll_table.next_state(ll_code, ll_state.index);
+            let ll_diff = ll_state.index - ll_next.baseline;
+
+            of_state = of_next;
+            ml_state = ml_next;
+            ll_state = ll_next;
+
+            // Batch state update bits: max 3 * acc_log = 3 * 9 = 27 bits
             {
-                let next = of_table.next_state(of_code, of_state.index);
-                let diff = of_state.index - next.baseline;
-                writer.write_bits(diff as u64, next.num_bits as usize);
-                of_state = next;
-            }
-            {
-                let next = ml_table.next_state(ml_code, ml_state.index);
-                let diff = ml_state.index - next.baseline;
-                writer.write_bits(diff as u64, next.num_bits as usize);
-                ml_state = next;
-            }
-            {
-                let next = ll_table.next_state(ll_code, ll_state.index);
-                let diff = ll_state.index - next.baseline;
-                writer.write_bits(diff as u64, next.num_bits as usize);
-                ll_state = next;
+                let mut bits: u64 = of_diff as u64;
+                let mut nbits: usize = of_next.num_bits as usize;
+                bits |= (ml_diff as u64) << nbits;
+                nbits += ml_next.num_bits as usize;
+                bits |= (ll_diff as u64) << nbits;
+                nbits += ll_next.num_bits as usize;
+                writer.write_bits_64(bits, nbits);
             }
 
-            writer.write_bits(ll_add_bits, ll_num_bits);
-            writer.write_bits(ml_add_bits, ml_num_bits);
-            writer.write_bits(of_add_bits, of_num_bits);
+            // Batch extra bits: max LL=16 + ML=16 + OF=31 = 63 bits
+            {
+                let mut bits: u64 = ll_add_bits as u64;
+                let mut nbits: usize = ll_num_bits;
+                bits |= (ml_add_bits as u64) << nbits;
+                nbits += ml_num_bits;
+                bits |= (of_add_bits as u64) << nbits;
+                nbits += of_num_bits;
+                if nbits > 0 {
+                    writer.write_bits_64(bits, nbits);
+                }
+            }
         }
     }
-    writer.write_bits(ml_state.index as u64, ml_table.table_size.ilog2() as usize);
-    writer.write_bits(of_state.index as u64, of_table.table_size.ilog2() as usize);
-    writer.write_bits(ll_state.index as u64, ll_table.table_size.ilog2() as usize);
+
+    // Final state indices: batch into one write (max 3 * 9 = 27 bits)
+    {
+        let mut bits: u64 = ml_state.index as u64;
+        let mut nbits: usize = ml_log;
+        bits |= (of_state.index as u64) << nbits;
+        nbits += of_log;
+        bits |= (ll_state.index as u64) << nbits;
+        nbits += ll_log;
+        writer.write_bits_64(bits, nbits);
+    }
 
     let bits_to_fill = writer.misaligned();
     if bits_to_fill == 0 {
@@ -376,62 +411,196 @@ fn encode_seqnum(seqnum: usize, writer: &mut BitWriter<impl AsMut<Vec<u8>>>) {
     }
 }
 
+/// Literal length code lookup for values 0..64.
+/// Maps directly from a literal length to its FSE symbol code.
+/// Matches C zstd's LL_Code table.
+static LL_CODE: [u8; 64] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20,
+    20, 20, 20, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23,
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
+];
+
+/// (baseline, num_extra_bits) for each LL code 0..36.
+/// For codes 0-15: baseline = code, extra = 0.
+/// For codes 16+: from the zstd spec.
+static LL_EXTRA: [(u32, usize); 36] = [
+    (0, 0),
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (4, 0),
+    (5, 0),
+    (6, 0),
+    (7, 0),
+    (8, 0),
+    (9, 0),
+    (10, 0),
+    (11, 0),
+    (12, 0),
+    (13, 0),
+    (14, 0),
+    (15, 0),
+    (16, 1),   // code 16
+    (18, 1),   // code 17
+    (20, 1),   // code 18
+    (22, 1),   // code 19
+    (24, 2),   // code 20
+    (28, 2),   // code 21
+    (32, 3),   // code 22
+    (40, 3),   // code 23
+    (48, 4),   // code 24
+    (64, 6),   // code 25
+    (128, 7),  // code 26
+    (256, 8),  // code 27
+    (512, 9),  // code 28
+    (1024, 10),  // code 29
+    (2048, 11),  // code 30
+    (4096, 12),  // code 31
+    (8192, 13),  // code 32
+    (16384, 14), // code 33
+    (32768, 15), // code 34
+    (65536, 16), // code 35
+];
+
+/// Fast literal length encoding via lookup tables.
+/// For LL < 64: direct table lookup (one cache line).
+/// For LL >= 64: compute from high bit (matches C zstd's ZSTD_LLcode).
+#[inline(always)]
+fn encode_literal_length_fast(len: u32) -> (u8, u32, usize) {
+    let code = if len < 64 {
+        LL_CODE[len as usize] as usize
+    } else {
+        // For values >= 64, the code is: highbit(len) + LL_DELTA_CODE
+        // where LL_DELTA_CODE = 19 (so code 25 starts at 64 = 2^6, 6+19=25)
+        const LL_DELTA_CODE: u32 = 19;
+        (len.ilog2() + LL_DELTA_CODE) as usize
+    };
+    let (baseline, num_bits) = LL_EXTRA[code];
+    (code as u8, len - baseline, num_bits)
+}
+
+/// Match length code lookup for values 0..128 (raw ML, NOT adjusted by -3).
+/// Indexed by (match_len - 3), so ML=3 -> index 0, ML=34 -> index 31, etc.
+/// Matches C zstd's ML_Code table.
+static ML_CODE: [u8; 128] = [
+    // ML 3..34 -> codes 0..31 (direct mapping)
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28, 29, 30, 31,
+    // ML 35..36 -> code 32 (1 extra bit)
+    32, 32,
+    // ML 37..38 -> code 33
+    33, 33,
+    // ML 39..40 -> code 34
+    34, 34,
+    // ML 41..42 -> code 35
+    35, 35,
+    // ML 43..46 -> code 36 (2 extra bits)
+    36, 36, 36, 36,
+    // ML 47..50 -> code 37
+    37, 37, 37, 37,
+    // ML 51..58 -> code 38 (3 extra bits)
+    38, 38, 38, 38, 38, 38, 38, 38,
+    // ML 59..66 -> code 39
+    39, 39, 39, 39, 39, 39, 39, 39,
+    // ML 67..82 -> code 40 (4 extra bits)
+    40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40,
+    // ML 83..98 -> code 41
+    41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41,
+    // ML 99..130 -> code 42 (5 extra bits): 32 entries
+    42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+    42, 42, 42, 42, 42, 42, 42, 42, 42,
+];
+
+/// (baseline, num_extra_bits) for each ML code 0..53.
+/// For codes 0-31: baseline = code + 3, extra = 0.
+/// For codes 32+: from the zstd spec.
+static ML_EXTRA: [(u32, usize); 53] = [
+    (3, 0),
+    (4, 0),
+    (5, 0),
+    (6, 0),
+    (7, 0),
+    (8, 0),
+    (9, 0),
+    (10, 0),
+    (11, 0),
+    (12, 0),
+    (13, 0),
+    (14, 0),
+    (15, 0),
+    (16, 0),
+    (17, 0),
+    (18, 0),
+    (19, 0),
+    (20, 0),
+    (21, 0),
+    (22, 0),
+    (23, 0),
+    (24, 0),
+    (25, 0),
+    (26, 0),
+    (27, 0),
+    (28, 0),
+    (29, 0),
+    (30, 0),
+    (31, 0),
+    (32, 0),
+    (33, 0),
+    (34, 0),
+    (35, 1),    // code 32
+    (37, 1),    // code 33
+    (39, 1),    // code 34
+    (41, 1),    // code 35
+    (43, 2),    // code 36
+    (47, 2),    // code 37
+    (51, 3),    // code 38
+    (59, 3),    // code 39
+    (67, 4),    // code 40
+    (83, 4),    // code 41
+    (99, 5),    // code 42
+    (131, 7),   // code 43
+    (259, 8),   // code 44
+    (515, 9),   // code 45
+    (1027, 10), // code 46
+    (2051, 11), // code 47
+    (4099, 12), // code 48
+    (8195, 13), // code 49
+    (16387, 14), // code 50
+    (32771, 15), // code 51
+    (65539, 16), // code 52
+];
+
+/// Fast match length encoding via lookup tables.
+/// For ML 3..130 (index 0..127): direct table lookup.
+/// For ML >= 131: compute from high bit (matches C zstd's ZSTD_MLcode).
+#[inline(always)]
+fn encode_match_len_fast(len: u32) -> (u8, u32, usize) {
+    debug_assert!(len >= 3, "match length must be >= 3, got {len}");
+    let adjusted = len - 3; // ML codes are 0-based from ML=3
+    let code = if adjusted < 128 {
+        ML_CODE[adjusted as usize] as usize
+    } else {
+        // For adjusted >= 128, the code is: highbit(adjusted) + ML_DELTA_CODE
+        // Using adjusted (not len) because ML code boundaries align to powers of 2
+        // in the adjusted domain: code 43 = [128, 255], code 44 = [256, 511], etc.
+        const ML_DELTA_CODE: u32 = 36;
+        (adjusted.ilog2() + ML_DELTA_CODE) as usize
+    };
+    let (baseline, num_bits) = ML_EXTRA[code];
+    (code as u8, len - baseline, num_bits)
+}
+
+/// Original match statement version, used by choose_table (not hot path).
 fn encode_literal_length(len: u32) -> (u8, u32, usize) {
-    match len {
-        0..=15 => (len as u8, 0, 0),
-        16..=17 => (16, len - 16, 1),
-        18..=19 => (17, len - 18, 1),
-        20..=21 => (18, len - 20, 1),
-        22..=23 => (19, len - 22, 1),
-        24..=27 => (20, len - 24, 2),
-        28..=31 => (21, len - 28, 2),
-        32..=39 => (22, len - 32, 3),
-        40..=47 => (23, len - 40, 3),
-        48..=63 => (24, len - 48, 4),
-        64..=127 => (25, len - 64, 6),
-        128..=255 => (26, len - 128, 7),
-        256..=511 => (27, len - 256, 8),
-        512..=1023 => (28, len - 512, 9),
-        1024..=2047 => (29, len - 1024, 10),
-        2048..=4095 => (30, len - 2048, 11),
-        4096..=8191 => (31, len - 4096, 12),
-        8192..=16383 => (32, len - 8192, 13),
-        16384..=32767 => (33, len - 16384, 14),
-        32768..=65535 => (34, len - 32768, 15),
-        65536..=131071 => (35, len - 65536, 16),
-        131072.. => unreachable!(),
-    }
+    encode_literal_length_fast(len)
 }
 
+/// Original match statement version, used by choose_table (not hot path).
 fn encode_match_len(len: u32) -> (u8, u32, usize) {
-    match len {
-        0..=2 => unreachable!(),
-        3..=34 => (len as u8 - 3, 0, 0),
-        35..=36 => (32, len - 35, 1),
-        37..=38 => (33, len - 37, 1),
-        39..=40 => (34, len - 39, 1),
-        41..=42 => (35, len - 41, 1),
-        43..=46 => (36, len - 43, 2),
-        47..=50 => (37, len - 47, 2),
-        51..=58 => (38, len - 51, 3),
-        59..=66 => (39, len - 59, 3),
-        67..=82 => (40, len - 67, 4),
-        83..=98 => (41, len - 83, 4),
-        99..=130 => (42, len - 99, 5),
-        131..=258 => (43, len - 131, 7),
-        259..=514 => (44, len - 259, 8),
-        515..=1026 => (45, len - 515, 9),
-        1027..=2050 => (46, len - 1027, 10),
-        2051..=4098 => (47, len - 2051, 11),
-        4099..=8194 => (48, len - 4099, 12),
-        8195..=16386 => (49, len - 8195, 13),
-        16387..=32770 => (50, len - 16387, 14),
-        32771..=65538 => (51, len - 32771, 15),
-        65539..=131074 => (52, len - 65539, 16),
-        131075.. => unreachable!(),
-    }
+    encode_match_len_fast(len)
 }
 
+#[inline(always)]
 fn encode_offset(len: u32) -> (u8, u32, usize) {
     let log = len.ilog2();
     let lower = len & ((1 << log) - 1);
@@ -904,6 +1073,94 @@ mod tests {
     }
 
     /// Verify that entropy coding changes produce valid compressed output.
+    /// Validate that the lookup-table-based encode_literal_length_fast produces
+    /// identical results to the original match statement for all possible inputs.
+    #[test]
+    fn literal_length_fast_matches_original() {
+        // Reference implementation using the original match statement
+        fn encode_literal_length_ref(len: u32) -> (u8, u32, usize) {
+            match len {
+                0..=15 => (len as u8, 0, 0),
+                16..=17 => (16, len - 16, 1),
+                18..=19 => (17, len - 18, 1),
+                20..=21 => (18, len - 20, 1),
+                22..=23 => (19, len - 22, 1),
+                24..=27 => (20, len - 24, 2),
+                28..=31 => (21, len - 28, 2),
+                32..=39 => (22, len - 32, 3),
+                40..=47 => (23, len - 40, 3),
+                48..=63 => (24, len - 48, 4),
+                64..=127 => (25, len - 64, 6),
+                128..=255 => (26, len - 128, 7),
+                256..=511 => (27, len - 256, 8),
+                512..=1023 => (28, len - 512, 9),
+                1024..=2047 => (29, len - 1024, 10),
+                2048..=4095 => (30, len - 2048, 11),
+                4096..=8191 => (31, len - 4096, 12),
+                8192..=16383 => (32, len - 8192, 13),
+                16384..=32767 => (33, len - 16384, 14),
+                32768..=65535 => (34, len - 32768, 15),
+                65536..=131071 => (35, len - 65536, 16),
+                131072.. => unreachable!(),
+            }
+        }
+
+        // Test all values 0..131072
+        for len in 0..131072u32 {
+            let fast = encode_literal_length_fast(len);
+            let reference = encode_literal_length_ref(len);
+            assert_eq!(
+                fast, reference,
+                "LL mismatch at len={len}: fast={fast:?} ref={reference:?}"
+            );
+        }
+    }
+
+    /// Validate that the lookup-table-based encode_match_len_fast produces
+    /// identical results to the original match statement for all possible inputs.
+    #[test]
+    fn match_len_fast_matches_original() {
+        // Reference implementation using the original match statement
+        fn encode_match_len_ref(len: u32) -> (u8, u32, usize) {
+            match len {
+                0..=2 => unreachable!(),
+                3..=34 => (len as u8 - 3, 0, 0),
+                35..=36 => (32, len - 35, 1),
+                37..=38 => (33, len - 37, 1),
+                39..=40 => (34, len - 39, 1),
+                41..=42 => (35, len - 41, 1),
+                43..=46 => (36, len - 43, 2),
+                47..=50 => (37, len - 47, 2),
+                51..=58 => (38, len - 51, 3),
+                59..=66 => (39, len - 59, 3),
+                67..=82 => (40, len - 67, 4),
+                83..=98 => (41, len - 83, 4),
+                99..=130 => (42, len - 99, 5),
+                131..=258 => (43, len - 131, 7),
+                259..=514 => (44, len - 259, 8),
+                515..=1026 => (45, len - 515, 9),
+                1027..=2050 => (46, len - 1027, 10),
+                2051..=4098 => (47, len - 2051, 11),
+                4099..=8194 => (48, len - 4099, 12),
+                8195..=16386 => (49, len - 8195, 13),
+                16387..=32770 => (50, len - 16387, 14),
+                32771..=65538 => (51, len - 32771, 15),
+                65539..=131074 => (52, len - 65539, 16),
+                131075.. => unreachable!(),
+            }
+        }
+
+        // Test all values 3..131075
+        for len in 3..131075u32 {
+            let fast = encode_match_len_fast(len);
+            let reference = encode_match_len_ref(len);
+            assert_eq!(
+                fast, reference,
+                "ML mismatch at len={len}: fast={fast:?} ref={reference:?}"
+            );
+        }
+    }
+
     /// Uses the same mixed data pattern as the benchmark.
     /// Note: 100KB mixed at L19 has a known pre-existing decoding issue
     /// (not caused by entropy changes), so we test with 10K here.

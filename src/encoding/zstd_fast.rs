@@ -9,7 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::compress_params::CompressionParams;
-use super::hash::{count_match, hash8, PRIME_4};
+use super::hash::{PRIME_4, count_match, hash8};
 use super::match_state::{
     CompressedBlock, RepCodes, SequenceOut, build_block, build_block_dict, emit_match_fast,
     hash_at, insert_hashes_dense, insert_hashes_sparse, prefill_hash_table_ext,
@@ -60,8 +60,14 @@ pub fn compress_fast_ext(
                 let rml = count_match(&src[pos..], &src[ref_pos..]);
                 if rml >= min_match as usize {
                     emit_match_fast(
-                        src, &mut literals, &mut sequences, &mut rep,
-                        anchor, pos, 1, rml as u32,
+                        src,
+                        &mut literals,
+                        &mut sequences,
+                        &mut rep,
+                        anchor,
+                        pos,
+                        1,
+                        rml as u32,
                     );
                     pos += rml;
                     anchor = pos;
@@ -81,20 +87,38 @@ pub fn compress_fast_ext(
         htable[h0 & ht_mask] = pos as u32;
 
         // Compute hash for pos+1 while checking pos
-        let h1 = if pos + 1 < end { fast_hash4(src, pos + 1, hash_shift) } else { 0 };
+        let h1 = if pos + 1 < end {
+            fast_hash4(src, pos + 1, hash_shift)
+        } else {
+            0
+        };
 
         // Check pos
         if idx0 > 0 && idx0 < pos && (pos - idx0) <= window_size {
-            if pos + 4 <= src.len() && idx0 + 4 <= src.len()
+            if pos + 4 <= src.len()
+                && idx0 + 4 <= src.len()
                 && src[pos..pos + 4] == src[idx0..idx0 + 4]
             {
                 let ml = count_match(&src[pos..], &src[idx0..]);
                 if ml >= min_match as usize {
                     // Insert pos+1's hash before emitting
-                    if pos + 1 < end { htable[h1 & ht_mask] = (pos + 1) as u32; }
+                    if pos + 1 < end {
+                        htable[h1 & ht_mask] = (pos + 1) as u32;
+                    }
                     emit_match_and_advance(
-                        src, htable, &mut literals, &mut sequences, &mut rep,
-                        &mut anchor, &mut pos, idx0, ml, end, hash_log, hash_shift, min_match,
+                        src,
+                        htable,
+                        &mut literals,
+                        &mut sequences,
+                        &mut rep,
+                        &mut anchor,
+                        &mut pos,
+                        idx0,
+                        ml,
+                        end,
+                        hash_log,
+                        hash_shift,
+                        min_match,
                     );
                     continue 'outer;
                 }
@@ -107,15 +131,27 @@ pub fn compress_fast_ext(
             htable[h1 & ht_mask] = (pos + 1) as u32;
 
             if idx1 > 0 && idx1 < pos + 1 && (pos + 1 - idx1) <= window_size {
-                if pos + 5 <= src.len() && idx1 + 4 <= src.len()
+                if pos + 5 <= src.len()
+                    && idx1 + 4 <= src.len()
                     && src[pos + 1..pos + 5] == src[idx1..idx1 + 4]
                 {
                     let ml = count_match(&src[pos + 1..], &src[idx1..]);
                     if ml >= min_match as usize {
                         pos += 1;
                         emit_match_and_advance(
-                            src, htable, &mut literals, &mut sequences, &mut rep,
-                            &mut anchor, &mut pos, idx1, ml, end, hash_log, hash_shift, min_match,
+                            src,
+                            htable,
+                            &mut literals,
+                            &mut sequences,
+                            &mut rep,
+                            &mut anchor,
+                            &mut pos,
+                            idx1,
+                            ml,
+                            end,
+                            hash_log,
+                            hash_shift,
+                            min_match,
                         );
                         continue 'outer;
                     }
@@ -158,8 +194,14 @@ fn emit_match_and_advance(
 ) {
     let real_offset = (*pos - match_pos) as u32;
     emit_match_fast(
-        src, literals, sequences, rep,
-        *anchor, *pos, real_offset + 3, ml as u32,
+        src,
+        literals,
+        sequences,
+        rep,
+        *anchor,
+        *pos,
+        real_offset + 3,
+        ml as u32,
     );
 
     let match_end = *pos + ml;

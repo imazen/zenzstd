@@ -33,7 +33,9 @@ fn make_random(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
     let mut s = 0x12345678u64;
     for _ in 0..size {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         data.push((s >> 33) as u8);
     }
     data
@@ -100,10 +102,17 @@ fn main() {
 
     println!(
         "{:<12} {:>3}  {:>7} {:>7} {:>6}  {:>8} {:>8} {:>6}  {:>8} {:>8} {:>6}",
-        "DATASET", "LVL",
-        "ZEN_SZ", "C_SZ", "ZN/C",
-        "ENC_ZEN", "ENC_C", "E_GAP",
-        "DEC_ZEN", "DEC_C", "D_GAP",
+        "DATASET",
+        "LVL",
+        "ZEN_SZ",
+        "C_SZ",
+        "ZN/C",
+        "ENC_ZEN",
+        "ENC_C",
+        "E_GAP",
+        "DEC_ZEN",
+        "DEC_C",
+        "D_GAP",
     );
     println!("{}", "-".repeat(115));
 
@@ -134,10 +143,17 @@ fn main() {
 
             println!(
                 "{:<12} {:>3}  {:>7} {:>7} {:>5.2}x  {:>7.0}M {:>7.0}M {:>5.1}x  {:>7.0}M {:>7.0}M {:>5.1}x",
-                name, level,
-                zen_sz, c_sz, size_ratio,
-                enc_zen, enc_c, enc_gap,
-                dec_zen, dec_c, dec_gap,
+                name,
+                level,
+                zen_sz,
+                c_sz,
+                size_ratio,
+                enc_zen,
+                enc_c,
+                enc_gap,
+                dec_zen,
+                dec_c,
+                dec_gap,
             );
         }
         println!();
