@@ -4,7 +4,7 @@ use super::super::blocks::literals_section::LiteralsSection;
 use super::super::blocks::literals_section::LiteralsSectionType;
 use super::super::blocks::sequence_section::SequencesHeader;
 use super::literals_section_decoder::decode_literals;
-use super::sequence_section_decoder::decode_sequences;
+use super::sequence_section_decoder::decode_and_execute_sequences;
 use crate::common::MAX_BLOCK_SIZE;
 use crate::decoding::errors::DecodeSequenceError;
 use crate::decoding::errors::{
@@ -12,7 +12,6 @@ use crate::decoding::errors::{
     DecompressBlockError,
 };
 use crate::decoding::scratch::DecoderScratch;
-use crate::decoding::sequence_execution::execute_sequences;
 use crate::io::Read;
 
 pub struct BlockDecoder {
@@ -133,11 +132,11 @@ impl BlockDecoder {
             .resize(header.content_size as usize, 0);
 
         source.read_exact(workspace.block_content_buffer.as_mut_slice())?;
-        let raw = workspace.block_content_buffer.as_slice();
 
+        // Parse literals section header (doesn't need mutable workspace beyond block_content_buffer)
         let mut section = LiteralsSection::new();
-        let bytes_in_literals_header = section.parse_from_header(raw)?;
-        let raw = &raw[bytes_in_literals_header as usize..];
+        let bytes_in_literals_header = section.parse_from_header(&workspace.block_content_buffer)?;
+        let mut cursor = bytes_in_literals_header as usize;
         vprintln!(
             "Found {} literalssection with regenerated size: {}, and compressed size: {:?}",
             section.ls_type,
@@ -154,21 +153,24 @@ impl BlockDecoder {
             },
         };
 
-        if raw.len() < upper_limit_for_literals {
+        let remaining_after_lit_header = header.content_size as usize - cursor;
+        if remaining_after_lit_header < upper_limit_for_literals {
             return Err(DecompressBlockError::MalformedSectionHeader {
                 expected_len: upper_limit_for_literals,
-                remaining_bytes: raw.len(),
+                remaining_bytes: remaining_after_lit_header,
             });
         }
 
-        let raw_literals = &raw[..upper_limit_for_literals];
-        vprintln!("Slice for literals: {}", raw_literals.len());
+        vprintln!(
+            "Slice for literals: {}",
+            upper_limit_for_literals
+        );
 
-        workspace.literals_buffer.clear(); //all literals of the previous block must have been used in the sequence execution anyways. just be defensive here
+        workspace.literals_buffer.clear();
         let bytes_used_in_literals_section = decode_literals(
             &section,
             &mut workspace.huf,
-            raw_literals,
+            &workspace.block_content_buffer[cursor..cursor + upper_limit_for_literals],
             &mut workspace.literals_buffer,
         )?;
         assert!(
@@ -179,41 +181,43 @@ impl BlockDecoder {
         );
         assert!(bytes_used_in_literals_section == upper_limit_for_literals as u32);
 
-        let raw = &raw[upper_limit_for_literals..];
-        vprintln!("Slice for sequences with headers: {}", raw.len());
+        cursor += upper_limit_for_literals;
+
+        // Parse sequence section header
+        let seq_header_remaining = header.content_size as usize - cursor;
+        vprintln!("Slice for sequences with headers: {}", seq_header_remaining);
 
         let mut seq_section = SequencesHeader::new();
-        let bytes_in_sequence_header = seq_section.parse_from_header(raw)?;
-        let raw = &raw[bytes_in_sequence_header as usize..];
+        let bytes_in_sequence_header =
+            seq_section.parse_from_header(&workspace.block_content_buffer[cursor..])?;
+        cursor += bytes_in_sequence_header as usize;
+
+        let seq_data_len = header.content_size as usize - cursor;
         vprintln!(
             "Found sequencessection with sequences: {} and size: {}",
             seq_section.num_sequences,
-            raw.len()
+            seq_data_len
         );
 
         assert!(
             u32::from(bytes_in_literals_header)
                 + bytes_used_in_literals_section
                 + u32::from(bytes_in_sequence_header)
-                + raw.len() as u32
+                + seq_data_len as u32
                 == header.content_size
         );
-        vprintln!("Slice for sequences: {}", raw.len());
+        vprintln!("Slice for sequences: {}", seq_data_len);
 
         if seq_section.num_sequences != 0 {
-            decode_sequences(
-                &seq_section,
-                raw,
-                &mut workspace.fse,
-                &mut workspace.sequences,
-            )?;
-            vprintln!("Executing sequences");
-            execute_sequences(workspace)?;
+            vprintln!("Fused decode+execute sequences");
+            // Pass byte range into block_content_buffer so the fused function
+            // can re-borrow without conflicting with &mut workspace.
+            decode_and_execute_sequences(&seq_section, workspace, cursor, seq_data_len)?;
         } else {
-            if !raw.is_empty() {
+            if seq_data_len != 0 {
                 return Err(DecompressBlockError::DecodeSequenceError(
                     DecodeSequenceError::ExtraBits {
-                        bits_remaining: raw.len() as isize * 8,
+                        bits_remaining: seq_data_len as isize * 8,
                     },
                 ));
             }

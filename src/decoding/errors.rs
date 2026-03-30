@@ -342,6 +342,24 @@ impl From<ExecuteSequencesError> for DecompressBlockError {
     }
 }
 
+impl From<DecodeBufferError> for DecompressBlockError {
+    fn from(val: DecodeBufferError) -> Self {
+        Self::ExecuteSequencesError(ExecuteSequencesError::DecodebufferError(val))
+    }
+}
+
+impl From<FSEDecoderError> for DecompressBlockError {
+    fn from(val: FSEDecoderError) -> Self {
+        Self::DecodeSequenceError(DecodeSequenceError::FSEDecoderError(val))
+    }
+}
+
+impl From<FSETableError> for DecompressBlockError {
+    fn from(val: FSETableError) -> Self {
+        Self::DecodeSequenceError(DecodeSequenceError::FSETableError(val))
+    }
+}
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DecodeBlockContentError {

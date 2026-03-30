@@ -1,7 +1,10 @@
 use super::scratch::DecoderScratch;
 use crate::decoding::errors::ExecuteSequencesError;
 
-/// Take the provided decoder and execute the sequences stored within
+/// Take the provided decoder and execute the sequences stored within.
+/// This is the old two-pass execution path, kept as a fallback for testing/validation.
+/// The fused decode+execute path in sequence_section_decoder.rs is used by default.
+#[allow(dead_code)]
 #[inline(always)]
 pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequencesError> {
     let mut literals_copy_counter = 0;
@@ -88,6 +91,7 @@ pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequ
 /// Update the most recently used offsets to reflect the provided offset value, and return the
 /// "actual" offset needed because offsets are not stored in a raw way, some transformations are needed
 /// before you get a functional number.
+#[allow(dead_code)]
 #[inline(always)]
 fn do_offset_history(offset_value: u32, lit_len: u32, scratch: &mut [u32; 3]) -> u32 {
     // Most common case: new offset (offset_value > 3).
