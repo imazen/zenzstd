@@ -87,11 +87,8 @@ pub fn compress_greedy_ext(
             next_to_update = match_end;
             pos = match_end;
             anchor = pos;
-            lazy_skipping = false;
         } else {
-            let step = ((pos - anchor) >> 8) + 1; // kSearchStrength = 8
-            pos += step;
-            lazy_skipping = step > K_LAZY_SKIPPING_STEP;
+            pos += 1;
         }
     }
 
@@ -114,7 +111,6 @@ pub fn compress_greedy_dict_ext(
     let mut pos = dict_len;
     let end = combined.len().saturating_sub(8);
     let mut next_to_update: usize = dict_len;
-    let mut lazy_skipping = false;
 
     while pos < end {
         let ll = (pos - anchor) as u32;
@@ -127,7 +123,7 @@ pub fn compress_greedy_dict_ext(
             params,
             ll,
             &mut next_to_update,
-            lazy_skipping,
+            false,
         );
         if let Some(m) = best {
             literals.extend_from_slice(&combined[anchor..pos]);
@@ -145,11 +141,8 @@ pub fn compress_greedy_dict_ext(
             next_to_update = me;
             pos = me;
             anchor = pos;
-            lazy_skipping = false;
         } else {
-            let step = ((pos - anchor) >> 8) + 1;
-            pos += step;
-            lazy_skipping = step > K_LAZY_SKIPPING_STEP;
+            pos += 1;
         }
     }
     build_block_dict(combined, dict_len, sequences, literals, anchor)
@@ -1267,6 +1260,15 @@ pub fn compress_lazy2_dict(
     )
 }
 
+/// Prefill the binary tree's HASH TABLE with dict positions.
+///
+/// Unlike the old approach that did full tree insertions for every dict position
+/// (O(n * search_depth)), this only updates the hash table, matching C zstd's
+/// `ZSTD_updateDUBT` which chains unsorted entries. The actual tree insertion
+/// happens lazily during `update_tree` / `insert_and_find`.
+///
+/// This is critical for performance: a 2MB window with full tree prefill was
+/// O(n^2), causing hangs on 1MB repetitive data at L15/L19.
 pub fn prefill_binary_tree(
     bt: &mut BinaryTree,
     combined: &[u8],
@@ -1274,19 +1276,30 @@ pub fn prefill_binary_tree(
     params: &CompressionParams,
 ) {
     if dict_len < 8 {
+        bt.next_to_update = dict_len;
         return;
     }
-    let min_match = params.min_match.max(4) as usize;
-    let search_depth = params.search_depth();
+    let min_match = params.min_match.max(4);
     let end = dict_len.saturating_sub(7);
+
+    // Only prefill the hash table (like C zstd's ZSTD_updateDUBT).
+    // Each position's hash points to the previous position with the same hash,
+    // stored as an unsorted chain via the tree's smaller_child slot.
     for pos in 0..end {
-        let window_size = params.window_size();
-        let window_low = if pos > window_size {
-            pos - window_size
-        } else {
-            0
-        };
-        bt.insert_only(combined, pos, min_match, search_depth, window_low);
+        if pos + 8 <= combined.len() {
+            let h = hash_ptr(&combined[pos..], bt.hash_log, min_match);
+            let match_index = bt.hash_table[h];
+            let (smaller_idx, larger_idx) = bt.children_idx(pos as u32);
+            bt.hash_table[h] = pos as u32;
+            // Store previous entry as unsorted chain
+            bt.tree[smaller_idx] = match_index;
+            // Mark as unsorted (use 1 as sentinel since 0 would be a valid "no child")
+            bt.tree[larger_idx] = 1; // ZSTD_DUBT_UNSORTED_MARK equivalent
+        }
     }
+    // Set next_to_update to dict_len so the search knows dict positions
+    // are in the hash table but may need sorting during the actual search.
+    // The update_tree call in search_binary_tree will handle positions
+    // from dict_len onward.
     bt.next_to_update = dict_len;
 }
