@@ -55,19 +55,22 @@ zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 ## Known Issues
 
 ### L16-22 compression ratio gap (zen/c = 1.17 on mixed_100KB)
-Block splitting is now implemented (both pre-split and post-split), but investigation showed the
-remaining 17% gap at L19 is caused by **entropy coding quality**, not block splitting. Trial
-encoding confirms that splitting our sequences into sub-blocks does not reduce total compressed
-size — the FSE/Huffman encoder produces similar output regardless of partition boundaries.
+FSE table mode selection and Huffman literal threshold have been fixed:
+- `choose_table` now estimates cost for predefined, repeat-last, and new (encoded) modes using
+  cross-entropy calculation (matching C zstd's ZSTD_selectEncodingType approach), picks cheapest
+- Huffman compression threshold lowered from 1024 to 32 bytes (with fallback to raw if Huffman
+  doesn't reduce size)
+- Previous-table tracking updated so repeat-last mode persists across blocks
 
-C zstd benefits from block splitting because its entropy encoder has finer table optimization
-(repeat-last mode, better predefined table selection, lower table overhead). Our encoder always
-builds new FSE tables (`choose_table` hardcodes `use_new_table = true`) and uses raw literals
-for literal counts <= 1024, missing Huffman compression on small literal sections.
+The remaining gap is likely in the optimal parser (BtOpt/BtUltra) match quality, not entropy coding.
 
-**Root cause:** Entropy encoder quality, not match finder or block structure.
-**Next steps:** Improve FSE table mode selection (predefined/repeat), enable Huffman for small
-literal sections, and reduce FSE table encoding overhead.
+### L19+ decoding corruption with mixed-entropy data
+The BtOpt/BtUltra match finder produces corrupt output for certain data patterns at levels 16-22.
+Specifically, the benchmark's `make_mixed` pattern (alternating ASCII letters and pseudo-random
+bytes) fails round-trip at any size >= ~1000 bytes. Repetitive text data and small inputs work
+correctly. This is a match finder bug, not an entropy coding issue.
+- Repro: compress `make_mixed(10000)` at L19, decode with our decoder — data mismatch
+- All levels 1-15 work correctly with the same data
 
 ## Features
 
