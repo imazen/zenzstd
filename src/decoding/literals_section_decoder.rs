@@ -117,9 +117,10 @@ fn decompress_literals(
 /// Decode a single Huffman bitstream, appending decoded bytes to `target`.
 ///
 /// The decode loop is optimized with:
-/// - 2-symbol unrolled inner loop: decode two symbols per iteration to
-///   reduce loop overhead and allow the CPU to overlap the two independent
-///   table lookups and bit extractions.
+/// - Single-refill 2-symbol unroll: each pair of symbols shares one refill call
+///   instead of each symbol potentially triggering its own refill. Since
+///   max_num_bits <= 11, two symbols need at most 22 bits — well within the
+///   56-bit guarantee after one refill.
 /// - Batch output: symbols are written to a fixed 128-byte buffer, then
 ///   flushed to the target Vec in bulk, reducing push/extend overhead.
 #[inline(always)]
@@ -146,30 +147,56 @@ fn decode_huffman_stream(
     decoder.init_state(&mut br);
 
     let end_threshold = -(table.max_num_bits as isize);
+    let max_bits = table.max_num_bits;
 
-    // Decode in batches of 128 bytes. The 2x unrolled inner loop decodes
-    // two symbols per iteration, reducing branch overhead.
+    // Decode in batches of 128 bytes.
     let mut batch = [0u8; 128];
     let mut batch_pos = 0;
 
-    // 2-symbol unrolled loop: each iteration decodes 2 symbols.
-    // The second check uses (end_threshold - max_num_bits) because
-    // next_state may consume up to max_num_bits additional bits.
-    let double_threshold = end_threshold;
-    while br.bits_remaining() > double_threshold {
-        batch[batch_pos] = decoder.decode_symbol();
-        batch_pos += 1;
-        decoder.next_state(&mut br);
+    // Fast path: 2-symbol unrolled loop. Each iteration decodes two symbols,
+    // halving the loop overhead. We use a threshold that guarantees enough bits
+    // for two full state transitions (2 * max_num_bits worst case) so we don't
+    // overshoot into the tail's territory. The tail loop handles the last few
+    // symbols one at a time.
+    //
+    // Use decode_and_advance_unchecked with a manual refill guard: only call
+    // refill_unconditional when the source is long enough (>= 8 bytes) AND
+    // the index hasn't been consumed into the slow-path region.
+    if stream.len() >= 8 {
+        let two_sym_threshold = 2 * max_bits as isize - 1;
+        while br.bits_remaining() > two_sym_threshold {
+            // Ensure enough bits: check if we need a refill, then use
+            // peek_and_advance for both symbols without further checks.
+            // Two symbols need at most 2 * 11 = 22 bits. After a refill
+            // we have at least 56, so both fit.
+            if br.bits_consumed() + 2 * max_bits > 64 {
+                // Only use unconditional refill when safe (far from stream end).
+                // Fall back to individual get_bits in the tail otherwise.
+                if !br.can_refill_fast() {
+                    break;
+                }
+                br.refill_unconditional();
+            }
 
-        if br.bits_remaining() <= end_threshold {
-            break;
+            // Both symbols fit in the current container (bits_consumed + 22 <= 64).
+            batch[batch_pos] = decoder.decode_and_advance_unchecked(&mut br);
+            batch[batch_pos + 1] = decoder.decode_and_advance_unchecked(&mut br);
+            batch_pos += 2;
+
+            if batch_pos >= 126 {
+                target.extend_from_slice(&batch[..batch_pos]);
+                batch_pos = 0;
+            }
         }
+    }
 
+    // Tail: decode remaining symbols one at a time.
+    while br.bits_remaining() > end_threshold {
         batch[batch_pos] = decoder.decode_symbol();
         batch_pos += 1;
         decoder.next_state(&mut br);
 
-        if batch_pos >= 126 {
+        if batch_pos >= 128 {
             target.extend_from_slice(&batch[..batch_pos]);
             batch_pos = 0;
         }

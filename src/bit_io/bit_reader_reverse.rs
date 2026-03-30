@@ -208,6 +208,14 @@ impl<'s> BitReaderReversed<'s> {
         (self.get_bits(n1), self.get_bits(n2), self.get_bits(n3))
     }
 
+    /// Returns true if `refill_unconditional` can use its fast path (8-byte load).
+    /// This is false near the end of the source where the slow path would fire.
+    #[inline(always)]
+    pub fn can_refill_fast(&self) -> bool {
+        let bytes_consumed = self.bits_consumed as usize / 8;
+        self.index >= bytes_consumed && (self.index - bytes_consumed) + 8 <= self.source.len()
+    }
+
     /// Peek at the next `n` bits and advance, WITHOUT checking whether enough
     /// bits are available. The caller must guarantee that at least `n` bits
     /// remain in the container (i.e., `bits_consumed + n <= 64`).

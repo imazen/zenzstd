@@ -54,6 +54,20 @@ impl<'t> HuffmanDecoder<'t> {
         self.state = ((self.state << num_bits) & table_mask as u64) | new_bits;
         num_bits
     }
+
+    /// Fused decode+next_state using `peek_and_advance` — caller must have
+    /// already called `refill_unconditional` and guaranteed enough bits remain.
+    /// Returns the decoded symbol.
+    #[inline(always)]
+    pub fn decode_and_advance_unchecked(&mut self, br: &mut BitReaderReversed<'_>) -> u8 {
+        let table_mask = self.table.decode.len() - 1;
+        let entry = self.table.decode[self.state as usize & table_mask];
+        let sym = entry.symbol;
+        let n = entry.num_bits;
+        let new_bits = br.peek_and_advance(n);
+        self.state = ((self.state << n) & table_mask as u64) | new_bits;
+        sym
+    }
 }
 
 /// A Huffman decoding table contains a list of Huffman prefix codes and their associated values

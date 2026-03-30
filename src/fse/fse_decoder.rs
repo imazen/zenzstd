@@ -165,6 +165,16 @@ impl FSETable {
         self.build_decoding_table()
     }
 
+    /// Restore this table from a pre-built decode array and accuracy log.
+    /// This skips the `build_decoding_table` computation entirely.
+    pub fn restore_from_prebuilt(&mut self, acc_log: u8, decode: &[Entry]) {
+        self.accuracy_log = acc_log;
+        self.decode.clear();
+        self.decode.extend_from_slice(decode);
+        self.symbol_probabilities.clear();
+        self.symbol_counter.clear();
+    }
+
     /// Build the actual decoding table after probabilities have been read into the table.
     /// After this function is called, the decoding process can begin.
     fn build_decoding_table(&mut self) -> Result<(), FSETableError> {
