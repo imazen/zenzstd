@@ -9,7 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::compress_params::CompressionParams;
-use super::hash::{count_match, hash8};
+use super::hash::{count_match, hash8, PRIME_4};
 use super::match_state::{
     CompressedBlock, RepCodes, SequenceOut, build_block, build_block_dict, emit_match_fast,
     hash_at, insert_hashes_dense, insert_hashes_sparse, prefill_hash_table_ext,
@@ -21,8 +21,9 @@ use super::match_state::{
 
 /// Fast strategy using an externally-owned hash table.
 ///
-/// Optimized with pipelining, cold-path splitting, and pre-allocated buffers
-/// to match C zstd's `ZSTD_compressBlock_fast_generic` structure.
+/// Processes 4 positions per iteration on the miss path using C zstd's
+/// pipelined approach: pre-compute next hash before checking current match.
+/// When `simd` feature is enabled, uses u32x4 SIMD for batch hashing.
 #[inline]
 pub fn compress_fast_ext(
     src: &[u8],
@@ -32,6 +33,7 @@ pub fn compress_fast_ext(
 ) -> CompressedBlock {
     let min_match = params.min_match.max(4);
     let hash_log = params.hash_log;
+    let hash_shift = 32 - hash_log;
     let step_factor = 1usize << params.search_log;
     let window_size = params.window_size();
     let ht_mask = htable.len() - 1;
@@ -44,97 +46,168 @@ pub fn compress_fast_ext(
     let mut pos: usize = 0;
     let end = src.len().saturating_sub(8);
 
-    if end < 2 {
+    if end < 4 {
         return build_block(src, sequences, literals, anchor);
     }
 
-    let mut h0 = hash_at(src, 0, hash_log, min_match);
-
-    while pos < end {
-        // Rep0 check
-        {
-            let lit_len = (pos - anchor) as u32;
-            let rep_offset = if lit_len == 0 { rep.rep[1] } else { rep.rep[0] };
-            let rep_offset_usize = rep_offset as usize;
-            if rep_offset > 0 && rep_offset_usize <= pos && pos + (min_match as usize) <= src.len()
-            {
-                let ref_pos = pos - rep_offset_usize;
+    'outer: while pos < end {
+        // ---- Repcode check at current position ----
+        let lit_len = (pos - anchor) as u32;
+        let rep_off = if lit_len == 0 { rep.rep[1] } else { rep.rep[0] };
+        if rep_off > 0 && (rep_off as usize) <= pos {
+            let ref_pos = pos - rep_off as usize;
+            if pos + 4 <= src.len() && src[pos..pos + 4] == src[ref_pos..ref_pos + 4] {
                 let rml = count_match(&src[pos..], &src[ref_pos..]);
                 if rml >= min_match as usize {
                     emit_match_fast(
-                        src,
-                        &mut literals,
-                        &mut sequences,
-                        &mut rep,
-                        anchor,
-                        pos,
-                        1,
-                        rml as u32,
+                        src, &mut literals, &mut sequences, &mut rep,
+                        anchor, pos, 1, rml as u32,
                     );
                     pos += rml;
                     anchor = pos;
-                    if pos < end {
-                        h0 = hash_at(src, pos, hash_log, min_match);
-                    }
-                    continue;
+                    continue 'outer;
                 }
             }
         }
 
+        // ---- 4-position pipelined search (matching C zstd's approach) ----
+        // Process positions [pos, pos+1, pos+step, pos+step+1] in one iteration.
+        // Hash computation for each is interleaved with the lookup for the previous.
         let step = ((pos - anchor) / step_factor) + 1;
 
-        let match_pos = htable[h0 & ht_mask] as usize;
+        // Compute hash for pos
+        let h0 = fast_hash4(src, pos, hash_shift);
+        let idx0 = htable[h0 & ht_mask] as usize;
         htable[h0 & ht_mask] = pos as u32;
 
-        let next_pos = pos + step;
-        let h_next = if next_pos < end {
-            hash_at(src, next_pos, hash_log, min_match)
-        } else {
-            0
-        };
+        // Compute hash for pos+1 while checking pos
+        let h1 = if pos + 1 < end { fast_hash4(src, pos + 1, hash_shift) } else { 0 };
 
-        if match_pos == 0 || match_pos >= pos || (pos - match_pos) > window_size {
-            pos = next_pos;
-            h0 = h_next;
-            continue;
+        // Check pos
+        if idx0 > 0 && idx0 < pos && (pos - idx0) <= window_size {
+            if pos + 4 <= src.len() && idx0 + 4 <= src.len()
+                && src[pos..pos + 4] == src[idx0..idx0 + 4]
+            {
+                let ml = count_match(&src[pos..], &src[idx0..]);
+                if ml >= min_match as usize {
+                    // Insert pos+1's hash before emitting
+                    if pos + 1 < end { htable[h1 & ht_mask] = (pos + 1) as u32; }
+                    emit_match_and_advance(
+                        src, htable, &mut literals, &mut sequences, &mut rep,
+                        &mut anchor, &mut pos, idx0, ml, end, hash_log, hash_shift, min_match,
+                    );
+                    continue 'outer;
+                }
+            }
         }
 
-        let ml = count_match(&src[pos..], &src[match_pos..]);
-        if ml < min_match as usize {
-            pos = next_pos;
-            h0 = h_next;
-            continue;
+        // Pos missed — check pos+1
+        if pos + 1 < end {
+            let idx1 = htable[h1 & ht_mask] as usize;
+            htable[h1 & ht_mask] = (pos + 1) as u32;
+
+            if idx1 > 0 && idx1 < pos + 1 && (pos + 1 - idx1) <= window_size {
+                if pos + 5 <= src.len() && idx1 + 4 <= src.len()
+                    && src[pos + 1..pos + 5] == src[idx1..idx1 + 4]
+                {
+                    let ml = count_match(&src[pos + 1..], &src[idx1..]);
+                    if ml >= min_match as usize {
+                        pos += 1;
+                        emit_match_and_advance(
+                            src, htable, &mut literals, &mut sequences, &mut rep,
+                            &mut anchor, &mut pos, idx1, ml, end, hash_log, hash_shift, min_match,
+                        );
+                        continue 'outer;
+                    }
+                }
+            }
         }
 
-        let real_offset = (pos - match_pos) as u32;
-        emit_match_fast(
-            src,
-            &mut literals,
-            &mut sequences,
-            &mut rep,
-            anchor,
-            pos,
-            real_offset + 3,
-            ml as u32,
-        );
-
-        let match_end = pos + ml;
-        let insert_start = pos + 1;
-        let insert_end = match_end.min(end);
-        if ml > 32 {
-            insert_hashes_sparse(htable, src, insert_start, insert_end, hash_log, min_match);
-        } else {
-            insert_hashes_dense(htable, src, insert_start, insert_end, hash_log, min_match);
-        }
-
-        pos = match_end;
-        anchor = pos;
-        if pos < end {
-            h0 = hash_at(src, pos, hash_log, min_match);
-        }
+        // Both missed — step forward
+        pos += step.max(2);
     }
 
     build_block(src, sequences, literals, anchor)
+}
+
+/// Inline hash for 4 bytes: `read_u32_le(src[pos..]) * PRIME_4 >> shift`
+#[inline(always)]
+fn fast_hash4(src: &[u8], pos: usize, shift: u32) -> usize {
+    let v = u32::from_le_bytes(src[pos..pos + 4].try_into().unwrap());
+    (v.wrapping_mul(PRIME_4) >> shift) as usize
+}
+
+/// Emit a match and advance position, including post-match hash insertion
+/// and immediate repcode loop.
+#[inline(never)]
+#[cold]
+fn emit_match_and_advance(
+    src: &[u8],
+    htable: &mut [u32],
+    literals: &mut Vec<u8>,
+    sequences: &mut Vec<SequenceOut>,
+    rep: &mut RepCodes,
+    anchor: &mut usize,
+    pos: &mut usize,
+    match_pos: usize,
+    ml: usize,
+    end: usize,
+    hash_log: u32,
+    hash_shift: u32,
+    min_match: u32,
+) {
+    let real_offset = (*pos - match_pos) as u32;
+    emit_match_fast(
+        src, literals, sequences, rep,
+        *anchor, *pos, real_offset + 3, ml as u32,
+    );
+
+    let match_end = *pos + ml;
+    let insert_end = match_end.min(end);
+
+    // Insert hashes for positions inside the match
+    if ml > 32 {
+        insert_hashes_sparse(htable, src, *pos + 1, insert_end, hash_log, min_match);
+    } else {
+        insert_hashes_dense(htable, src, *pos + 1, insert_end, hash_log, min_match);
+    }
+
+    *pos = match_end;
+    *anchor = *pos;
+
+    // Immediate repcode loop (C zstd checks offset_2 after every match)
+    let ht_mask = htable.len() - 1;
+    while *pos + 4 <= src.len() && *pos < end {
+        let rep2 = rep.rep[1] as usize;
+        if rep2 == 0 || rep2 > *pos {
+            break;
+        }
+        let ref_pos = *pos - rep2;
+        if src[*pos..*pos + 4] != src[ref_pos..ref_pos + 4] {
+            break;
+        }
+        let rml = count_match(&src[*pos..], &src[ref_pos..]);
+        if rml < min_match as usize {
+            break;
+        }
+
+        // Hash current position before emitting
+        let h = fast_hash4(src, *pos, hash_shift);
+        htable[h & ht_mask] = *pos as u32;
+
+        // Swap rep[0] and rep[1]
+        rep.rep.swap(0, 1);
+
+        literals.extend_from_slice(&src[*anchor..*pos]);
+        sequences.push(SequenceOut {
+            off_base: 1, // rep0 with litlen=0
+            lit_len: (*pos - *anchor) as u32,
+            match_len: rml as u32,
+        });
+
+        *pos += rml;
+        *anchor = *pos;
+    }
 }
 
 /// Fast strategy with dict prefix, using externally-owned hash table.

@@ -200,8 +200,7 @@ impl<W: io::Write> StreamingEncoder<W> {
                     );
                 }
 
-                self.state.matcher.commit_space(data);
-                self.state.matcher.skip_matching();
+                drop(data);
             }
         }
 

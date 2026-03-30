@@ -12,7 +12,7 @@
 const PRIME_3: u32 = 506_832_829;
 
 /// Knuth multiplicative hash constant for 4-byte keys.
-const PRIME_4: u32 = 2_654_435_761;
+pub(crate) const PRIME_4: u32 = 2_654_435_761;
 
 /// Hash constant for 5-byte keys.
 const PRIME_5: u64 = 889_523_592_379;

@@ -275,8 +275,8 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                         );
                     }
 
-                    self.state.matcher.commit_space(uncompressed_data);
-                    self.state.matcher.skip_matching();
+                    // MatchState handles cross-block state. Don't feed the old Matcher.
+                    drop(uncompressed_data);
                 }
             }
             is_first_block = false;
