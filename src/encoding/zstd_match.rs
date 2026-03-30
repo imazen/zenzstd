@@ -1706,4 +1706,21 @@ mod tests {
         // off_base 100 = real offset 97
         assert_eq!(100u32 - 3, 97);
     }
+
+    #[test]
+    fn large_block_reconstruction() {
+        // Test with 67KB of pattern data — this exposed a bug where
+        // the match finder produced incorrect sequences for large blocks
+        let mut data = Vec::new();
+        for _ in 0..1500 {
+            data.extend_from_slice(b"The quick brown fox jumps over the lazy dog. ");
+        }
+        assert!(data.len() > 60_000);
+
+        for level in [1, 3, 5, 7, 9, 11] {
+            let params = params_for_level(level, Some(data.len() as u64));
+            let block = compress_block_zstd(&data, &params);
+            verify_reconstruction(&data, &block);
+        }
+    }
 }
