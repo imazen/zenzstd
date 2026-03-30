@@ -7,7 +7,7 @@ use crate::blocks::sequence_section::{
     MAX_LITERAL_LENGTH_CODE, MAX_MATCH_LENGTH_CODE, MAX_OFFSET_CODE,
 };
 use crate::decoding::errors::{DecodeSequenceError, DecompressBlockError, ExecuteSequencesError};
-use crate::fse::FSEDecoder;
+use crate::fse::{FSEDecoder, SeqFSEDecoder};
 use alloc::vec::Vec;
 
 #[cfg(feature = "simd")]
@@ -554,6 +554,9 @@ fn maybe_update_fse_tables(
         }
     };
 
+    // Rebuild pre-resolved sequence tables after any FSE table changes.
+    scratch.rebuild_seq_tables(&LL_CODE_TABLE, &ML_CODE_TABLE);
+
     Ok(bytes_read)
 }
 
@@ -660,6 +663,10 @@ pub fn decode_and_execute_sequences(
 
 /// Fused decode+execute for the common case (no RLE modes).
 ///
+/// Uses pre-resolved SeqEntry tables that combine FSE state info with
+/// the LL/ML/OF code table lookups, eliminating 2 table lookups per sequence
+/// (matching C zstd's ZSTD_seqSymbol approach).
+///
 /// Hot state (pos, total_output_counter, offset history) is hoisted to stack locals.
 /// When the `simd` feature is enabled, `#[autoversion]` generates per-ISA variants
 /// (scalar, SSE4.2, AVX2+BMI2) so the compiler can use TZCNT, BMI2 bit extraction,
@@ -676,13 +683,13 @@ fn fused_decode_execute_fast_inner(
     offset_hist: &mut [u32; 3],
     literals_buffer: &[u8],
 ) -> Result<(), DecompressBlockError> {
-    let mut ll_dec = FSEDecoder::new(&fse.literal_lengths);
-    let mut ml_dec = FSEDecoder::new(&fse.match_lengths);
-    let mut of_dec = FSEDecoder::new(&fse.offsets);
+    let mut ll_dec = SeqFSEDecoder::new(&fse.seq_ll);
+    let mut ml_dec = SeqFSEDecoder::new(&fse.seq_ml);
+    let mut of_dec = SeqFSEDecoder::new(&fse.seq_of);
 
-    ll_dec.init_state(br)?;
-    of_dec.init_state(br)?;
-    ml_dec.init_state(br)?;
+    ll_dec.init_state(br, fse.literal_lengths.accuracy_log)?;
+    of_dec.init_state(br, fse.offsets.accuracy_log)?;
+    ml_dec.init_state(br, fse.match_lengths.accuracy_log)?;
 
     let num_sequences = section.num_sequences as usize;
     let literals_len = literals_buffer.len();
@@ -706,27 +713,26 @@ fn fused_decode_execute_fast_inner(
     let mut off3 = offset_hist[2];
 
     for seq_idx in 0..num_sequences {
-        let (of_code, of_nbits, _of_baseline) = of_dec.decode_and_params();
-        let (ml_code, ml_nbits, _ml_baseline) = ml_dec.decode_and_params();
-        let (ll_code, ll_nbits, _ll_baseline) = ll_dec.decode_and_params();
+        // Pre-resolved decode: one table load gives base_value + extra_bits + state transition info.
+        // No separate lookup_ll_code / lookup_ml_code needed.
+        let (of_base, of_extra, of_next, of_sbits) = of_dec.decode_params();
+        let (ml_base, ml_extra, ml_next, ml_sbits) = ml_dec.decode_params();
+        let (ll_base, ll_extra, ll_next, ll_sbits) = ll_dec.decode_params();
 
-        let (ll_value, ll_extra_bits) = lookup_ll_code(ll_code);
-        let (ml_value, ml_extra_bits) = lookup_ml_code(ml_code);
-
-        if of_code > MAX_OFFSET_CODE {
+        if of_extra > MAX_OFFSET_CODE {
             buffer.buffer.pos = pos;
             buffer.total_output_counter = total_out;
             offset_hist[0] = off1;
             offset_hist[1] = off2;
             offset_hist[2] = off3;
             return Err(DecodeSequenceError::UnsupportedOffset {
-                offset_code: of_code,
+                offset_code: of_extra,
             }
             .into());
         }
 
-        let extra_sum = of_code + ml_extra_bits + ll_extra_bits;
-        let state_sum = ll_nbits + ml_nbits + of_nbits;
+        let extra_sum = of_extra + ml_extra + ll_extra;
+        let state_sum = ll_sbits + ml_sbits + of_sbits;
 
         let (obits, ml_add, ll_add, ll_state_add, ml_state_add, of_state_add);
 
@@ -736,26 +742,27 @@ fn fused_decode_execute_fast_inner(
                 if br.bits_consumed() + total > 64 {
                     br.refill_unconditional();
                 }
-                obits = br.peek_and_advance(of_code);
-                ml_add = br.peek_and_advance(ml_extra_bits);
-                ll_add = br.peek_and_advance(ll_extra_bits);
-                ll_state_add = br.peek_and_advance(ll_nbits);
-                ml_state_add = br.peek_and_advance(ml_nbits);
-                of_state_add = br.peek_and_advance(of_nbits);
+                obits = br.peek_and_advance(of_extra);
+                ml_add = br.peek_and_advance(ml_extra);
+                ll_add = br.peek_and_advance(ll_extra);
+                ll_state_add = br.peek_and_advance(ll_sbits);
+                ml_state_add = br.peek_and_advance(ml_sbits);
+                of_state_add = br.peek_and_advance(of_sbits);
             } else {
-                (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+                (obits, ml_add, ll_add) = br.get_bits_triple(of_extra, ml_extra, ll_extra);
                 (ll_state_add, ml_state_add, of_state_add) =
-                    br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
+                    br.get_bits_triple(ll_sbits, ml_sbits, of_sbits);
             }
 
-            ll_dec.apply_state_update(ll_state_add);
-            ml_dec.apply_state_update(ml_state_add);
-            of_dec.apply_state_update(of_state_add);
+            ll_dec.apply_state_update(ll_next, ll_state_add);
+            ml_dec.apply_state_update(ml_next, ml_state_add);
+            of_dec.apply_state_update(of_next, of_state_add);
         } else {
-            (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+            (obits, ml_add, ll_add) = br.get_bits_triple(of_extra, ml_extra, ll_extra);
         }
 
-        let offset = obits as u32 + (1u32 << of_code);
+        // of_base already contains (1 << of_code), obits are the extra bits
+        let offset = obits as u32 + of_base;
 
         if offset == 0 {
             buffer.buffer.pos = pos;
@@ -776,11 +783,10 @@ fn fused_decode_execute_fast_inner(
         }
 
         // --- Execute this sequence inline ---
-        let ll = (ll_value + ll_add as u32) as usize;
-        let ml = (ml_value + ml_add as u32) as usize;
+        let ll = (ll_base + ll_add as u32) as usize;
+        let ml = (ml_base + ml_add as u32) as usize;
 
         // Copy literals — direct buf write, no method call overhead.
-        // Access buffer.buffer.buf directly to get &mut Vec<u8>.
         if ll > 0 {
             let high = literals_copy_counter + ll;
             if high > literals_len {
@@ -1099,12 +1105,11 @@ fn do_offset_history_inline(offset_value: u32, lit_len: u32, hist: &mut [u32; 3]
     actual_offset
 }
 
-/// Offset history resolution using hoisted stack locals instead of array indexing.
-/// Avoids array bounds checks and keeps all three offsets in registers.
-#[inline(always)]
 /// Resolve the actual byte offset from the zstd offset code and update history.
 ///
-/// Uses an array-based approach to minimize branching. The offset history
+/// Offset history resolution using hoisted stack locals instead of array indexing.
+/// Avoids array bounds checks and keeps all three offsets in registers.
+/// Uses an array-based approach to minimize branching: the offset history
 /// is stored as [off1, off2, off3] and the lookup/rotation is done via
 /// indexed access rather than if/match chains.
 #[inline(always)]

@@ -376,6 +376,126 @@ fn next_position(mut p: usize, table_size: usize) -> usize {
     p
 }
 
+/// A pre-resolved FSE table entry for sequence decoding that eliminates
+/// the separate LL_CODE_TABLE / ML_CODE_TABLE lookups.
+///
+/// Mirrors C zstd's `ZSTD_seqSymbol` layout: 8 bytes, packed so that a
+/// single table load gives everything needed to decode a sequence component.
+///
+/// Fields:
+/// - `next_state`: base state for the FSE state transition (Entry::base_line)
+/// - `state_bits`: bits to read for the state transition (Entry::num_bits)
+/// - `extra_bits`: additional bits to read for the decoded value
+/// - `base_value`: baseline value for the decoded output
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub struct SeqEntry {
+    pub base_value: u32,
+    pub next_state: u16,
+    pub state_bits: u8,
+    pub extra_bits: u8,
+}
+
+/// Decoder for pre-resolved sequence FSE tables.
+///
+/// Unlike `FSEDecoder` which returns a raw symbol code, this decoder
+/// gives direct access to `base_value` and `extra_bits` without a
+/// second lookup through LL_CODE_TABLE or ML_CODE_TABLE.
+///
+/// The table mask is precomputed to avoid a length load on every state update.
+pub struct SeqFSEDecoder<'table> {
+    pub state: usize,
+    table: &'table [SeqEntry],
+    /// Precomputed `table.len() - 1`. Table sizes are always powers of 2.
+    mask: usize,
+}
+
+impl<'t> SeqFSEDecoder<'t> {
+    #[inline(always)]
+    pub fn new(table: &'t [SeqEntry]) -> SeqFSEDecoder<'t> {
+        SeqFSEDecoder {
+            state: 0,
+            table,
+            mask: table.len().wrapping_sub(1),
+        }
+    }
+
+    /// Initialize state from the bitstream (reads accuracy_log bits).
+    #[inline(always)]
+    pub fn init_state(
+        &mut self,
+        bits: &mut crate::bit_io::BitReaderReversed<'_>,
+        accuracy_log: u8,
+    ) -> Result<(), FSEDecoderError> {
+        if accuracy_log == 0 {
+            return Err(FSEDecoderError::TableIsUninitialized);
+        }
+        let new_state = bits.get_bits(accuracy_log) as usize;
+        self.state = new_state & self.mask;
+        Ok(())
+    }
+
+    /// Read all decode parameters from the current state in one shot.
+    /// Returns (base_value, extra_bits, next_state, state_bits).
+    #[inline(always)]
+    pub fn decode_params(&self) -> (u32, u8, u16, u8) {
+        let entry = self.table[self.state];
+        (
+            entry.base_value,
+            entry.extra_bits,
+            entry.next_state,
+            entry.state_bits,
+        )
+    }
+
+    /// Apply a pre-read bit value to update state.
+    #[inline(always)]
+    pub fn apply_state_update(&mut self, next_state: u16, add: u64) {
+        let new_state = next_state as usize + add as usize;
+        self.state = new_state & self.mask;
+    }
+}
+
+/// Build a pre-resolved SeqEntry table from an FSE decode table and a
+/// code-to-(baseValue, extraBits) mapping.
+///
+/// `code_table` maps symbol code -> (base_value, extra_bits).
+/// For LL this is LL_CODE_TABLE, for ML this is ML_CODE_TABLE.
+/// For OF, base_value = (1 << code) and extra_bits = code.
+pub fn build_seq_table(fse_table: &FSETable, code_table: &[(u32, u8)]) -> alloc::vec::Vec<SeqEntry> {
+    let mut seq = alloc::vec::Vec::with_capacity(fse_table.decode.len());
+    for entry in &fse_table.decode {
+        let (base_value, extra_bits) = if (entry.symbol as usize) < code_table.len() {
+            code_table[entry.symbol as usize]
+        } else {
+            (0, 0)
+        };
+        seq.push(SeqEntry {
+            base_value,
+            extra_bits,
+            next_state: entry.base_line as u16,
+            state_bits: entry.num_bits,
+        });
+    }
+    seq
+}
+
+/// Build a pre-resolved SeqEntry table for offset codes.
+/// Offset codes have base_value = (1 << code) and extra_bits = code.
+pub fn build_seq_table_offset(fse_table: &FSETable) -> alloc::vec::Vec<SeqEntry> {
+    let mut seq = alloc::vec::Vec::with_capacity(fse_table.decode.len());
+    for entry in &fse_table.decode {
+        let code = entry.symbol;
+        seq.push(SeqEntry {
+            base_value: 1u32 << code,
+            extra_bits: code,
+            next_state: entry.base_line as u16,
+            state_bits: entry.num_bits,
+        });
+    }
+    seq
+}
+
 fn calc_baseline_and_numbits(
     num_states_total: u32,
     num_states_symbol: u32,

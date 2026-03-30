@@ -3,7 +3,7 @@
 use super::super::blocks::sequence_section::Sequence;
 use super::decode_buffer::DecodeBuffer;
 use crate::decoding::dictionary::Dictionary;
-use crate::fse::FSETable;
+use crate::fse::{FSETable, SeqEntry};
 use crate::huff0::HuffmanTable;
 use alloc::vec::Vec;
 
@@ -32,17 +32,7 @@ impl DecoderScratch {
             huf: HuffmanScratch {
                 table: HuffmanTable::new(),
             },
-            fse: FSEScratch {
-                offsets: FSETable::new(MAX_OFFSET_CODE),
-                of_rle: None,
-                literal_lengths: FSETable::new(MAX_LITERAL_LENGTH_CODE),
-                ll_rle: None,
-                match_lengths: FSETable::new(MAX_MATCH_LENGTH_CODE),
-                ml_rle: None,
-                predefined_ll: None,
-                predefined_ml: None,
-                predefined_of: None,
-            },
+            fse: FSEScratch::new(),
             buffer: DecodeBuffer::new(window_size),
             offset_hist: [1, 4, 8],
 
@@ -109,6 +99,13 @@ pub struct FSEScratch {
     pub match_lengths: FSETable,
     pub ml_rle: Option<u8>,
 
+    /// Pre-resolved sequence tables: combine FSE state transition info
+    /// with the LL/ML/OF code table lookups into a single entry.
+    /// Built by `rebuild_seq_tables()` after any FSE table update.
+    pub seq_ll: Vec<SeqEntry>,
+    pub seq_ml: Vec<SeqEntry>,
+    pub seq_of: Vec<SeqEntry>,
+
     /// Cached predefined decode tables. Built once on first use, then
     /// `restore_from_prebuilt` copies the decode array instead of recomputing.
     predefined_ll: Option<PredefinedCache>,
@@ -132,6 +129,9 @@ impl FSEScratch {
             ll_rle: None,
             match_lengths: FSETable::new(MAX_MATCH_LENGTH_CODE),
             ml_rle: None,
+            seq_ll: Vec::new(),
+            seq_ml: Vec::new(),
+            seq_of: Vec::new(),
             predefined_ll: None,
             predefined_ml: None,
             predefined_of: None,
@@ -145,6 +145,13 @@ impl FSEScratch {
         self.of_rle = other.of_rle;
         self.ll_rle = other.ll_rle;
         self.ml_rle = other.ml_rle;
+        // Copy pre-resolved seq tables
+        self.seq_ll.clear();
+        self.seq_ll.extend_from_slice(&other.seq_ll);
+        self.seq_ml.clear();
+        self.seq_ml.extend_from_slice(&other.seq_ml);
+        self.seq_of.clear();
+        self.seq_of.extend_from_slice(&other.seq_of);
         // Don't copy predefined caches — they are decoder-lifetime, not per-frame.
     }
 
@@ -208,6 +215,23 @@ impl FSEScratch {
             decode: self.offsets.decode.clone(),
         });
         Ok(())
+    }
+
+    /// Rebuild the pre-resolved SeqEntry tables from the current FSE decode tables.
+    /// Must be called after any FSE table update (FSECompressed, Predefined, or Repeat
+    /// when the underlying table changed).
+    ///
+    /// `ll_code_table` and `ml_code_table` map symbol code -> (base_value, extra_bits).
+    pub fn rebuild_seq_tables(&mut self, ll_code_table: &[(u32, u8)], ml_code_table: &[(u32, u8)]) {
+        if self.ll_rle.is_none() {
+            self.seq_ll = crate::fse::build_seq_table(&self.literal_lengths, ll_code_table);
+        }
+        if self.ml_rle.is_none() {
+            self.seq_ml = crate::fse::build_seq_table(&self.match_lengths, ml_code_table);
+        }
+        if self.of_rle.is_none() {
+            self.seq_of = crate::fse::build_seq_table_offset(&self.offsets);
+        }
     }
 }
 

@@ -145,37 +145,33 @@ impl<'s> BitReaderReversed<'s> {
 
     /// Get the next `n` bits from the source without consuming them.
     /// Caller is responsible for making sure that `n` many bits have been refilled.
+    ///
+    /// Branchless: handles n=0 correctly (returns 0) without a branch.
     #[inline(always)]
     pub fn peek_bits(&mut self, n: u8) -> u64 {
-        if n == 0 {
-            return 0;
-        }
-
+        let shift_by = (64u8.wrapping_sub(self.bits_consumed).wrapping_sub(n)) & 63;
         let mask = (1u64 << n) - 1u64;
-        let shift_by = 64 - self.bits_consumed - n;
         (self.bit_container >> shift_by) & mask
     }
 
-    /// Get the next `n1` `n2` and `n3` bits from the source without consuming them.
+    /// Get the next `n1`, `n2`, and `n3` bits from the source without consuming them.
     /// Caller is responsible for making sure that `sum` many bits have been refilled.
+    ///
+    /// Branchless: handles sum=0 and individual n=0 values correctly without branches.
     #[inline(always)]
     pub fn peek_bits_triple(&mut self, sum: u8, n1: u8, n2: u8, n3: u8) -> (u64, u64, u64) {
-        if sum == 0 {
-            return (0, 0, 0);
-        }
-
         // all_three contains bits like this: |XXXX..XXX111122223333|
         // Where XXX are already consumed bytes, 1/2/3 are bits of the respective value
         // Lower bits are to the right
-        let all_three = self.bit_container >> (64 - self.bits_consumed - sum);
+        let shift = (64u8.wrapping_sub(self.bits_consumed).wrapping_sub(sum)) & 63;
+        let all_three = self.bit_container >> shift;
 
         let mask1 = (1u64 << n1) - 1u64;
-        let shift_by1 = n3 + n2;
+        let shift_by1 = (n3 + n2) & 63;
         let val1 = (all_three >> shift_by1) & mask1;
 
         let mask2 = (1u64 << n2) - 1u64;
-        let shift_by2 = n3;
-        let val2 = (all_three >> shift_by2) & mask2;
+        let val2 = (all_three >> (n3 & 63)) & mask2;
 
         let mask3 = (1u64 << n3) - 1u64;
         let val3 = all_three & mask3;
@@ -222,12 +218,14 @@ impl<'s> BitReaderReversed<'s> {
     ///
     /// This is the building block for the "single refill per sequence" pattern:
     /// refill once, then extract multiple values with `peek_and_advance`.
+    ///
+    /// Branchless: handles n=0 correctly (returns 0) without a branch.
+    /// When n=0, mask=0 so the result is zero regardless of the shift.
     #[inline(always)]
     pub fn peek_and_advance(&mut self, n: u8) -> u64 {
-        if n == 0 {
-            return 0;
-        }
-        let shift_by = 64 - self.bits_consumed - n;
+        // Mask shift_by to [0,63] to avoid shift overflow when n=0 and bits_consumed=0.
+        // When n=0, mask=(1<<0)-1=0, so value=0 regardless of the shifted container.
+        let shift_by = (64u8.wrapping_sub(self.bits_consumed).wrapping_sub(n)) & 63;
         let mask = (1u64 << n) - 1u64;
         let value = (self.bit_container >> shift_by) & mask;
         self.bits_consumed += n;
