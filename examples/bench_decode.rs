@@ -1,13 +1,16 @@
+use std::hint::black_box;
 use std::io::Cursor;
 use std::time::Instant;
-use std::hint::black_box;
 
 fn make_mixed(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
     let mut i = 0u32;
     while data.len() < size {
-        if i % 100 < 50 { data.push(b'A' + (i % 26) as u8); }
-        else { data.push(((i.wrapping_mul(2654435761) >> 16) & 0xFF) as u8); }
+        if i % 100 < 50 {
+            data.push(b'A' + (i % 26) as u8);
+        } else {
+            data.push(((i.wrapping_mul(2654435761) >> 16) & 0xFF) as u8);
+        }
         i += 1;
     }
     data
@@ -37,5 +40,9 @@ fn main() {
     }
     let elapsed = start.elapsed().as_secs_f64() / iters as f64;
     let mbps = data.len() as f64 / elapsed / 1_000_000.0;
-    eprintln!("mixed_100k decode: {:.0} MB/s ({:.1} µs/call)", mbps, elapsed * 1e6);
+    eprintln!(
+        "mixed_100k decode: {:.0} MB/s ({:.1} µs/call)",
+        mbps,
+        elapsed * 1e6
+    );
 }

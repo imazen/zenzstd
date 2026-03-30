@@ -138,8 +138,7 @@ fn decode_sequences_with_rle(
                 ml_state_add = br.peek_and_advance(ml_nbits);
                 of_state_add = br.peek_and_advance(of_nbits);
             } else {
-                (obits, ml_add, ll_add) =
-                    br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+                (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
                 (ll_state_add, ml_state_add, of_state_add) =
                     br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
             }
@@ -154,8 +153,7 @@ fn decode_sequences_with_rle(
                 of_dec.apply_state_update(of_state_add);
             }
         } else {
-            (obits, ml_add, ll_add) =
-                br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+            (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
         }
 
         let offset = obits as u32 + (1u32 << of_code);
@@ -282,8 +280,7 @@ fn decode_sequences_fast(
                 of_state_add = br.peek_and_advance(of_nbits);
             } else {
                 // Need two refills: one for extra bits, one for state updates
-                (obits, ml_add, ll_add) =
-                    br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+                (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
                 (ll_state_add, ml_state_add, of_state_add) =
                     br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
             }
@@ -293,8 +290,7 @@ fn decode_sequences_fast(
             of_dec.apply_state_update(of_state_add);
         } else {
             // Last sequence: no state update needed
-            (obits, ml_add, ll_add) =
-                br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+            (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
         }
 
         let offset = obits as u32 + (1u32 << of_code);
@@ -616,8 +612,7 @@ pub fn decode_and_execute_sequences(
 ) -> Result<(), DecompressBlockError> {
     // Phase 1: Update FSE tables. Only needs &mut scratch.fse and the source slice.
     let bytes_read = {
-        let source =
-            &scratch.block_content_buffer[seq_data_offset..seq_data_offset + seq_data_len];
+        let source = &scratch.block_content_buffer[seq_data_offset..seq_data_offset + seq_data_len];
         maybe_update_fse_tables(section, source, &mut scratch.fse)?
     };
 
@@ -654,14 +649,7 @@ pub fn decode_and_execute_sequences(
     if fse.ll_rle.is_some() || fse.ml_rle.is_some() || fse.of_rle.is_some() {
         fused_decode_execute_rle_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer)
     } else {
-        fused_decode_execute_fast_inner(
-            section,
-            &mut br,
-            fse,
-            buffer,
-            offset_hist,
-            literals_buffer,
-        )
+        fused_decode_execute_fast_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer)
     }
 }
 
@@ -752,8 +740,7 @@ fn fused_decode_execute_fast_inner(
                 ml_state_add = br.peek_and_advance(ml_nbits);
                 of_state_add = br.peek_and_advance(of_nbits);
             } else {
-                (obits, ml_add, ll_add) =
-                    br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+                (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
                 (ll_state_add, ml_state_add, of_state_add) =
                     br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
             }
@@ -762,8 +749,7 @@ fn fused_decode_execute_fast_inner(
             ml_dec.apply_state_update(ml_state_add);
             of_dec.apply_state_update(of_state_add);
         } else {
-            (obits, ml_add, ll_add) =
-                br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+            (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
         }
 
         let offset = obits as u32 + (1u32 << of_code);
@@ -814,7 +800,8 @@ fn fused_decode_execute_fast_inner(
         }
 
         // Resolve offset and update history — fully inlined with stack locals
-        let actual_offset = do_offset_history_hoisted(offset, ll as u32, &mut off1, &mut off2, &mut off3);
+        let actual_offset =
+            do_offset_history_hoisted(offset, ll as u32, &mut off1, &mut off2, &mut off3);
         if actual_offset == 0 {
             buffer.buffer.pos = pos;
             buffer.total_output_counter = total_out;
@@ -854,12 +841,16 @@ fn fused_decode_execute_fast_inner(
                     buffer.buffer.buf[pos..pos + ml].fill(byte);
                 } else {
                     // Overlapping: doubling copy
-                    buffer.buffer.buf
+                    buffer
+                        .buffer
+                        .buf
                         .copy_within(src_abs..src_abs + distance, pos);
                     let mut written = distance;
                     while written < ml {
                         let copy_len = written.min(ml - written);
-                        buffer.buffer.buf
+                        buffer
+                            .buffer
+                            .buf
                             .copy_within(pos..pos + copy_len, pos + written);
                         written += copy_len;
                     }
@@ -985,8 +976,7 @@ fn fused_decode_execute_rle_inner(
                 ml_state_add = br.peek_and_advance(ml_nbits);
                 of_state_add = br.peek_and_advance(of_nbits);
             } else {
-                (obits, ml_add, ll_add) =
-                    br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+                (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
                 (ll_state_add, ml_state_add, of_state_add) =
                     br.get_bits_triple(ll_nbits, ml_nbits, of_nbits);
             }
@@ -1001,8 +991,7 @@ fn fused_decode_execute_rle_inner(
                 of_dec.apply_state_update(of_state_add);
             }
         } else {
-            (obits, ml_add, ll_add) =
-                br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
+            (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_extra_bits, ll_extra_bits);
         }
 
         let offset = obits as u32 + (1u32 << of_code);

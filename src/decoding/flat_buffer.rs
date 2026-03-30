@@ -203,8 +203,7 @@ impl FlatBuffer {
     #[inline(never)]
     fn extend_from_within_slow(&mut self, src_abs: usize, distance: usize, len: usize) {
         // Copy the initial pattern.
-        self.buf
-            .copy_within(src_abs..src_abs + distance, self.pos);
+        self.buf.copy_within(src_abs..src_abs + distance, self.pos);
 
         // Doubling copy: double what we've written so far.
         let mut written = distance;

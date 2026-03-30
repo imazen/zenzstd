@@ -135,7 +135,8 @@ impl BlockDecoder {
 
         // Parse literals section header (doesn't need mutable workspace beyond block_content_buffer)
         let mut section = LiteralsSection::new();
-        let bytes_in_literals_header = section.parse_from_header(&workspace.block_content_buffer)?;
+        let bytes_in_literals_header =
+            section.parse_from_header(&workspace.block_content_buffer)?;
         let mut cursor = bytes_in_literals_header as usize;
         vprintln!(
             "Found {} literalssection with regenerated size: {}, and compressed size: {:?}",
@@ -161,10 +162,7 @@ impl BlockDecoder {
             });
         }
 
-        vprintln!(
-            "Slice for literals: {}",
-            upper_limit_for_literals
-        );
+        vprintln!("Slice for literals: {}", upper_limit_for_literals);
 
         workspace.literals_buffer.clear();
         let bytes_used_in_literals_section = decode_literals(

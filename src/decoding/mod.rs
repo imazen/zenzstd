@@ -10,9 +10,9 @@ pub use streaming_decoder::StreamingDecoder;
 pub(crate) mod block_decoder;
 pub(crate) mod decode_buffer;
 pub(crate) mod dictionary;
+mod flat_buffer;
 pub(crate) mod frame;
 pub(crate) mod literals_section_decoder;
-mod flat_buffer;
 mod ringbuffer;
 #[allow(dead_code)]
 pub(crate) mod scratch;
