@@ -11,8 +11,12 @@ pub mod zstd_match;
 
 mod frame_compressor;
 mod levels;
+#[cfg(feature = "std")]
+mod streaming_encoder;
 pub use frame_compressor::FrameCompressor;
 pub use match_generator::MatchGeneratorDriver;
+#[cfg(feature = "std")]
+pub use streaming_encoder::StreamingEncoder;
 
 use crate::io::{Read, Write};
 use alloc::vec::Vec;
