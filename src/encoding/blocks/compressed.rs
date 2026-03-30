@@ -174,13 +174,11 @@ fn choose_table<'a>(
     let new_cost = new_table_desc_bits + new_entropy_bits;
 
     // Estimate encoded size with predefined/default table (0 table overhead)
-    let default_cost =
-        estimate_encoding_cost_with_table(default_table, &counts, max_symbol);
+    let default_cost = estimate_encoding_cost_with_table(default_table, &counts, max_symbol);
 
     // Estimate encoded size with previous table (0 table overhead)
-    let repeat_cost = previous.map(|prev| {
-        estimate_encoding_cost_with_table(prev, &counts, max_symbol)
-    });
+    let repeat_cost =
+        previous.map(|prev| estimate_encoding_cost_with_table(prev, &counts, max_symbol));
 
     // Pick the cheapest option
     let mut best_cost = new_cost;
@@ -257,18 +255,17 @@ fn estimate_encoding_cost_with_table(
 static INVERSE_PROBABILITY_LOG256: [u16; 256] = [
     0, 2048, 1792, 1642, 1536, 1453, 1386, 1329, 1280, 1236, 1197, 1162, 1130, 1100, 1073, 1047,
     1024, 1001, 980, 960, 941, 923, 906, 889, 874, 859, 844, 830, 817, 804, 791, 779, 768, 756,
-    745, 734, 724, 714, 704, 694, 685, 676, 667, 658, 650, 642, 633, 626, 618, 610, 603, 595,
-    588, 581, 574, 567, 561, 554, 548, 542, 535, 529, 523, 517, 512, 506, 500, 495, 489, 484,
-    478, 473, 468, 463, 458, 453, 448, 443, 438, 434, 429, 424, 420, 415, 411, 407, 402, 398,
-    394, 390, 386, 382, 377, 373, 370, 366, 362, 358, 354, 350, 347, 343, 339, 336, 332, 329,
-    325, 322, 318, 315, 311, 308, 305, 302, 298, 295, 292, 289, 286, 282, 279, 276, 273, 270,
-    267, 264, 261, 258, 256, 253, 250, 247, 244, 241, 239, 236, 233, 230, 228, 225, 222, 220,
-    217, 215, 212, 209, 207, 204, 202, 199, 197, 194, 192, 190, 187, 185, 182, 180, 178, 175,
-    173, 171, 168, 166, 164, 162, 159, 157, 155, 153, 151, 149, 146, 144, 142, 140, 138, 136,
-    134, 132, 130, 128, 126, 123, 121, 119, 117, 115, 114, 112, 110, 108, 106, 104, 102, 100,
-    98, 96, 94, 93, 91, 89, 87, 85, 83, 82, 80, 78, 76, 74, 73, 71, 69, 67, 66, 64, 62, 61,
-    59, 57, 55, 54, 52, 50, 49, 47, 46, 44, 42, 41, 39, 37, 36, 34, 33, 31, 30, 28, 26, 25,
-    23, 22, 20, 19, 17, 16, 14, 13, 11, 10, 8, 7, 5, 4, 2, 1,
+    745, 734, 724, 714, 704, 694, 685, 676, 667, 658, 650, 642, 633, 626, 618, 610, 603, 595, 588,
+    581, 574, 567, 561, 554, 548, 542, 535, 529, 523, 517, 512, 506, 500, 495, 489, 484, 478, 473,
+    468, 463, 458, 453, 448, 443, 438, 434, 429, 424, 420, 415, 411, 407, 402, 398, 394, 390, 386,
+    382, 377, 373, 370, 366, 362, 358, 354, 350, 347, 343, 339, 336, 332, 329, 325, 322, 318, 315,
+    311, 308, 305, 302, 298, 295, 292, 289, 286, 282, 279, 276, 273, 270, 267, 264, 261, 258, 256,
+    253, 250, 247, 244, 241, 239, 236, 233, 230, 228, 225, 222, 220, 217, 215, 212, 209, 207, 204,
+    202, 199, 197, 194, 192, 190, 187, 185, 182, 180, 178, 175, 173, 171, 168, 166, 164, 162, 159,
+    157, 155, 153, 151, 149, 146, 144, 142, 140, 138, 136, 134, 132, 130, 128, 126, 123, 121, 119,
+    117, 115, 114, 112, 110, 108, 106, 104, 102, 100, 98, 96, 94, 93, 91, 89, 87, 85, 83, 82, 80,
+    78, 76, 74, 73, 71, 69, 67, 66, 64, 62, 61, 59, 57, 55, 54, 52, 50, 49, 47, 46, 44, 42, 41, 39,
+    37, 36, 34, 33, 31, 30, 28, 26, 25, 23, 22, 20, 19, 17, 16, 14, 13, 11, 10, 8, 7, 5, 4, 2, 1,
 ];
 
 fn encode_table(mode: &FseTableMode<'_>, writer: &mut BitWriter<&mut Vec<u8>>) {
@@ -726,8 +723,8 @@ mod tests {
         // We produce codes with similar relative frequencies, scaled up.
         let mut codes: Vec<u8> = Vec::new();
         let default_probs = [
-            4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1,
-            2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
+            4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1,
+            1, 1, 1,
         ];
         for (sym, &prob) in default_probs.iter().enumerate() {
             for _ in 0..(prob * 3) {
@@ -735,12 +732,7 @@ mod tests {
             }
         }
 
-        let mode = choose_table(
-            None,
-            &default_ll,
-            codes.iter().copied(),
-            9,
-        );
+        let mode = choose_table(None, &default_ll, codes.iter().copied(), 9);
         assert!(
             matches!(mode, FseTableMode::Predefined(_)),
             "Expected predefined table mode for default-like distribution, got {:?}",
@@ -761,24 +753,30 @@ mod tests {
         // First, build a custom distribution
         let codes: Vec<u8> = {
             let mut v = Vec::new();
-            for _ in 0..200 { v.push(0); }
-            for _ in 0..100 { v.push(1); }
-            for _ in 0..50 { v.push(2); }
-            for _ in 0..25 { v.push(3); }
-            for _ in 0..10 { v.push(4); }
+            for _ in 0..200 {
+                v.push(0);
+            }
+            for _ in 0..100 {
+                v.push(1);
+            }
+            for _ in 0..50 {
+                v.push(2);
+            }
+            for _ in 0..25 {
+                v.push(3);
+            }
+            for _ in 0..10 {
+                v.push(4);
+            }
             v
         };
 
         // First call builds a new table
-        let mode1 = choose_table(
-            None,
-            &default_ll,
-            codes.iter().copied(),
-            9,
-        );
+        let mode1 = choose_table(None, &default_ll, codes.iter().copied(), 9);
         let prev_table = match &mode1 {
             FseTableMode::Encoded(t) => t,
-            other => panic!("Expected Encoded for first call, got {:?}",
+            other => panic!(
+                "Expected Encoded for first call, got {:?}",
                 match other {
                     FseTableMode::Predefined(_) => "Predefined",
                     FseTableMode::Encoded(_) => "Encoded",
@@ -788,12 +786,7 @@ mod tests {
         };
 
         // Second call with same distribution should use repeat-last
-        let mode2 = choose_table(
-            Some(prev_table),
-            &default_ll,
-            codes.iter().copied(),
-            9,
-        );
+        let mode2 = choose_table(Some(prev_table), &default_ll, codes.iter().copied(), 9);
         assert!(
             matches!(mode2, FseTableMode::RepeateLast(_)),
             "Expected RepeateLast for same distribution, got {:?}",
@@ -815,18 +808,19 @@ mod tests {
         // heavily concentrated on high offset codes, which don't match the default
         let codes: Vec<u8> = {
             let mut v = Vec::new();
-            for _ in 0..300 { v.push(20); }
-            for _ in 0..200 { v.push(21); }
-            for _ in 0..100 { v.push(22); }
+            for _ in 0..300 {
+                v.push(20);
+            }
+            for _ in 0..200 {
+                v.push(21);
+            }
+            for _ in 0..100 {
+                v.push(22);
+            }
             v
         };
 
-        let mode = choose_table(
-            None,
-            &default_of,
-            codes.iter().copied(),
-            8,
-        );
+        let mode = choose_table(None, &default_of, codes.iter().copied(), 8);
 
         // The default offset table doesn't have high codes at all, so
         // it should return usize::MAX cost, forcing encoded mode
@@ -941,9 +935,7 @@ mod tests {
                 let mut decoded = Vec::with_capacity(data.len() + 4096);
                 decoder
                     .decode_all_to_vec(&compressed, &mut decoded)
-                    .unwrap_or_else(|e| panic!(
-                        "Our decoder failed at L{level} {size}B: {e:?}"
-                    ));
+                    .unwrap_or_else(|e| panic!("Our decoder failed at L{level} {size}B: {e:?}"));
                 assert_eq!(data, decoded, "mismatch at L{level} {size}B");
             }
         }
