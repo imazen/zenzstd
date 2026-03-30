@@ -20,15 +20,18 @@ pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
         let mut v3 = seed;
         let mut v4 = seed.wrapping_sub(PRIME64_1);
 
-        let mut offset = 0;
-        while offset + 32 <= data.len() {
-            // Fixed-size array cast eliminates interior bounds checks.
-            let chunk: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
-            v1 = round(v1, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[0..8]).unwrap()));
-            v2 = round(v2, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[8..16]).unwrap()));
-            v3 = round(v3, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[16..24]).unwrap()));
-            v4 = round(v4, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[24..32]).unwrap()));
-            offset += 32;
+        // Process 32 bytes at a time. Use chunks_exact to get &[u8] slices
+        // that LLVM knows are exactly 32 bytes, then cast to &[u8; 32] once.
+        // All sub-array indexing on a [u8; 32] is compile-time provable in-bounds.
+        let chunks = data.chunks_exact(32);
+        let remainder = chunks.remainder();
+        for chunk in chunks {
+            let c: &[u8; 32] = chunk.try_into().unwrap();
+            // Sub-slicing a fixed array: LLVM proves [0..8] etc. are in-bounds at compile time
+            v1 = round(v1, u64::from_le_bytes(read8(c, 0)));
+            v2 = round(v2, u64::from_le_bytes(read8(c, 8)));
+            v3 = round(v3, u64::from_le_bytes(read8(c, 16)));
+            v4 = round(v4, u64::from_le_bytes(read8(c, 24)));
         }
 
         h64 = v1
@@ -42,9 +45,7 @@ pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
         h64 = merge_round(h64, v3);
         h64 = merge_round(h64, v4);
 
-        // Process remaining data
-        let remaining = &data[offset..];
-        h64 = finalize_remaining(h64, remaining, len);
+        h64 = finalize_remaining(h64, remainder, len);
     } else {
         h64 = seed.wrapping_add(PRIME64_5);
         h64 = finalize_remaining(h64, data, len);
@@ -85,6 +86,16 @@ fn finalize_remaining(mut h64: u64, data: &[u8], total_len: u64) -> u64 {
     }
 
     avalanche(h64)
+}
+
+/// Extract 8 bytes from a 32-byte array at a known offset.
+/// Because `src` is `&[u8; 32]` and `off` is a constant 0/8/16/24,
+/// LLVM proves the sub-slice is in-bounds at compile time — zero runtime checks.
+#[inline(always)]
+fn read8(src: &[u8; 32], off: usize) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&src[off..off + 8]);
+    out
 }
 
 #[inline(always)]
@@ -163,31 +174,31 @@ impl XxHash64 {
             offset += take;
 
             if self.buf_len == 32 {
-                // buf is [u8; 32] — zero bounds checks with fixed-size reads
-                let b = &self.buf;
-                self.v1 = round(self.v1, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[0..8]).unwrap()));
-                self.v2 = round(self.v2, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[8..16]).unwrap()));
-                self.v3 = round(self.v3, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[16..24]).unwrap()));
-                self.v4 = round(self.v4, u64::from_le_bytes(*<&[u8; 8]>::try_from(&b[24..32]).unwrap()));
+                // self.buf is [u8; 32] — sub-indexing proven in-bounds at compile time
+                self.v1 = round(self.v1, u64::from_le_bytes(read8(&self.buf, 0)));
+                self.v2 = round(self.v2, u64::from_le_bytes(read8(&self.buf, 8)));
+                self.v3 = round(self.v3, u64::from_le_bytes(read8(&self.buf, 16)));
+                self.v4 = round(self.v4, u64::from_le_bytes(read8(&self.buf, 24)));
                 self.buf_len = 0;
             }
         }
 
-        // Process 32-byte chunks
-        while offset + 32 <= data.len() {
-            let chunk: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
-            self.v1 = round(self.v1, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[0..8]).unwrap()));
-            self.v2 = round(self.v2, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[8..16]).unwrap()));
-            self.v3 = round(self.v3, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[16..24]).unwrap()));
-            self.v4 = round(self.v4, u64::from_le_bytes(*<&[u8; 8]>::try_from(&chunk[24..32]).unwrap()));
-            offset += 32;
+        // Process 32-byte chunks via chunks_exact — one try_into per 32 bytes
+        let tail = &data[offset..];
+        let chunks = tail.chunks_exact(32);
+        let leftover = chunks.remainder();
+        for chunk in chunks {
+            let c: &[u8; 32] = chunk.try_into().unwrap();
+            self.v1 = round(self.v1, u64::from_le_bytes(read8(c, 0)));
+            self.v2 = round(self.v2, u64::from_le_bytes(read8(c, 8)));
+            self.v3 = round(self.v3, u64::from_le_bytes(read8(c, 16)));
+            self.v4 = round(self.v4, u64::from_le_bytes(read8(c, 24)));
         }
 
-        // Buffer remaining
-        let remaining = data.len() - offset;
-        if remaining > 0 {
-            self.buf[..remaining].copy_from_slice(&data[offset..]);
-            self.buf_len = remaining;
+        // Buffer remaining bytes (0-31)
+        if !leftover.is_empty() {
+            self.buf[..leftover.len()].copy_from_slice(leftover);
+            self.buf_len = leftover.len();
         }
     }
 
