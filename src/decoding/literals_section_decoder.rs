@@ -8,6 +8,9 @@ use crate::decoding::errors::DecompressLiteralsError;
 use crate::huff0::HuffmanDecoder;
 use alloc::vec::Vec;
 
+#[cfg(feature = "simd")]
+use archmage::prelude::*;
+
 /// Decode and decompress the provided literals section into `target`, returning the number of bytes read.
 pub fn decode_literals(
     section: &LiteralsSection,
@@ -93,14 +96,20 @@ fn decompress_literals(
         let stream4 = &source[jump3..];
 
         for stream in &[stream1, stream2, stream3, stream4] {
-            decode_huffman_stream(stream, &scratch.table, target)?;
+            #[cfg(feature = "simd")]
+            { archmage::incant!(decode_huffman_stream(stream, &scratch.table, target))?; }
+            #[cfg(not(feature = "simd"))]
+            { decode_huffman_stream(stream, &scratch.table, target)?; }
         }
 
         bytes_read += source.len() as u32;
     } else {
         //just decode the one stream
         assert!(num_streams == 1);
-        decode_huffman_stream(source, &scratch.table, target)?;
+        #[cfg(feature = "simd")]
+        { archmage::incant!(decode_huffman_stream(source, &scratch.table, target))?; }
+        #[cfg(not(feature = "simd"))]
+        { decode_huffman_stream(source, &scratch.table, target)?; }
         bytes_read += source.len() as u32;
     }
 
@@ -123,7 +132,11 @@ fn decompress_literals(
 ///   56-bit guarantee after one refill.
 /// - Batch output: symbols are written to a fixed 128-byte buffer, then
 ///   flushed to the target Vec in bulk, reducing push/extend overhead.
-#[inline(always)]
+///
+/// When `simd` feature is enabled, `#[autoversion]` generates per-ISA variants
+/// so the Huffman bit extraction benefits from BMI2 on AVX2 CPUs.
+#[cfg_attr(feature = "simd", archmage::autoversion)]
+#[cfg_attr(not(feature = "simd"), inline(always))]
 fn decode_huffman_stream(
     stream: &[u8],
     table: &crate::huff0::HuffmanTable,
