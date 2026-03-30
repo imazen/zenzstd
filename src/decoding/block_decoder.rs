@@ -127,9 +127,12 @@ impl BlockDecoder {
         workspace: &mut DecoderScratch, //reuse this as often as possible. Not only if the trees are reused but also reuse the allocations when building new trees
         mut source: impl Read,
     ) -> Result<(), DecompressBlockError> {
-        workspace
-            .block_content_buffer
-            .resize(header.content_size as usize, 0);
+        // Resize the buffer to the needed length. When the buffer already
+        // has len >= needed from a previous block, this just truncates (no
+        // zeroing). Only the first block after a reset pays the memset cost.
+        // See DecoderScratch::reset() which preserves len to avoid this.
+        let needed = header.content_size as usize;
+        workspace.block_content_buffer.resize(needed, 0);
 
         source.read_exact(workspace.block_content_buffer.as_mut_slice())?;
 

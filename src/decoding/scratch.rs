@@ -56,7 +56,9 @@ impl DecoderScratch {
         self.offset_hist = [1, 4, 8];
         self.literals_buffer.clear();
         self.sequences.clear();
-        self.block_content_buffer.clear();
+        // Don't clear block_content_buffer — it is fully overwritten by
+        // read_exact on each block. Keeping its length avoids a memset
+        // (resize from 0→128KB) on the first compressed block of each frame.
 
         self.buffer.reset(window_size);
 

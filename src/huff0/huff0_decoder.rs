@@ -8,32 +8,60 @@ use alloc::vec::Vec;
 /// The Zstandard specification limits the maximum length of a code to 11 bits.
 pub(crate) const MAX_MAX_NUM_BITS: u8 = 11;
 
+/// Minimum table size: always at least `1 << MAX_MAX_NUM_BITS` = 2048 entries.
+/// The table is padded to this constant size so the mask is known at compile time,
+/// enabling LLVM to fold the `& mask` into addressing and elide bounds checks.
+const TABLE_SIZE: usize = 1 << MAX_MAX_NUM_BITS;
+const TABLE_MASK: usize = TABLE_SIZE - 1;
+
 pub struct HuffmanDecoder<'table> {
-    table: &'table HuffmanTable,
-    /// State is used to index into the table.
+    /// Fixed-size reference to the decode table. Converting from Vec to
+    /// `&[Entry; TABLE_SIZE]` once at construction proves to LLVM that
+    /// all `& TABLE_MASK` indices are in-bounds, eliminating bounds checks
+    /// from the entire decode hot path.
+    decode: &'table [Entry; TABLE_SIZE],
+    /// State is used to index into the table. Width = `max_num_bits`.
     pub state: u64,
+    /// Mask for the state register: `(1 << max_num_bits) - 1`.
+    /// Cached here to avoid recomputing from the table on every transition.
+    state_mask: u64,
+    /// The actual maximum code length from the Huffman table.
+    max_num_bits: u8,
 }
 
 impl<'t> HuffmanDecoder<'t> {
-    /// Create a new decoder with the provided table
+    /// Create a new decoder with the provided table.
+    ///
+    /// Converts the Vec-backed decode table to a fixed-size array reference,
+    /// proving to LLVM that all TABLE_MASK-masked indices are in-bounds.
     pub fn new(table: &'t HuffmanTable) -> HuffmanDecoder<'t> {
-        HuffmanDecoder { table, state: 0 }
+        let decode: &[Entry; TABLE_SIZE] = table
+            .decode
+            .as_slice()
+            .try_into()
+            .expect("decode table must be TABLE_SIZE entries");
+        HuffmanDecoder {
+            state_mask: (1u64 << table.max_num_bits) - 1,
+            max_num_bits: table.max_num_bits,
+            decode,
+            state: 0,
+        }
     }
 
     /// Decode the symbol the internal state (cursor) is pointed at and return the
     /// decoded literal.
     #[inline(always)]
-    pub fn decode_symbol(&mut self) -> u8 {
-        // Table size is always power-of-2, mask state to help LLVM elide bounds check
-        let mask = self.table.decode.len() - 1;
-        self.table.decode[self.state as usize & mask].symbol
+    pub fn decode_symbol(&self) -> u8 {
+        // TABLE_MASK is compile-time 2047, decode is [Entry; 2048].
+        // LLVM proves `state & 2047 < 2048` → zero bounds checks.
+        self.decode[self.state as usize & TABLE_MASK].symbol
     }
 
     /// Initialize internal state and prepare to decode data. Then, `decode_symbol` can be called
     /// to read the byte the internal cursor is pointing at, and `next_state` can be called to advance
     /// the cursor until the max number of bits has been read.
     pub fn init_state(&mut self, br: &mut BitReaderReversed<'_>) -> u8 {
-        let num_bits = self.table.max_num_bits;
+        let num_bits = self.max_num_bits;
         let new_bits = br.get_bits(num_bits);
         self.state = new_bits;
         num_bits
@@ -43,15 +71,10 @@ impl<'t> HuffmanDecoder<'t> {
     /// to read from the new position.
     #[inline(always)]
     pub fn next_state(&mut self, br: &mut BitReaderReversed<'_>) -> u8 {
-        // Table size is always power-of-2; mask guarantees in-bounds access,
-        // helping LLVM eliminate the bounds check entirely.
-        let table_mask = self.table.decode.len() - 1;
-        let entry = self.table.decode[self.state as usize & table_mask];
+        let entry = self.decode[self.state as usize & TABLE_MASK];
         let num_bits = entry.num_bits;
-        // New bits are read from the stream
         let new_bits = br.get_bits(num_bits);
-        // Shift and mask out the bits that identify the current symbol
-        self.state = ((self.state << num_bits) & table_mask as u64) | new_bits;
+        self.state = ((self.state << num_bits) & self.state_mask) | new_bits;
         num_bits
     }
 
@@ -60,12 +83,11 @@ impl<'t> HuffmanDecoder<'t> {
     /// Returns the decoded symbol.
     #[inline(always)]
     pub fn decode_and_advance_unchecked(&mut self, br: &mut BitReaderReversed<'_>) -> u8 {
-        let table_mask = self.table.decode.len() - 1;
-        let entry = self.table.decode[self.state as usize & table_mask];
+        let entry = self.decode[self.state as usize & TABLE_MASK];
         let sym = entry.symbol;
         let n = entry.num_bits;
         let new_bits = br.peek_and_advance(n);
-        self.state = ((self.state << n) & table_mask as u64) | new_bits;
+        self.state = ((self.state << n) & self.state_mask) | new_bits;
         sym
     }
 }
@@ -298,6 +320,17 @@ impl HuffmanTable {
     /// into a table, and use that table to decode the actual compressed data.
     ///
     /// This function populates the rest of the table from the series of weights.
+    ///
+    /// The table is always padded to `TABLE_SIZE` (2048) entries regardless of
+    /// the actual maximum code length. This means:
+    /// - The table size is constant (2048 * 2 = 4KB), fits in L1 cache
+    /// - The decode loop's table mask is a compile-time constant (`TABLE_MASK`)
+    /// - LLVM can fold the `& TABLE_MASK` into addressing, eliding bounds checks
+    ///
+    /// `max_num_bits` retains the actual max code length (for `init_state` and
+    /// end-of-stream detection). The state width matches `max_num_bits` as before;
+    /// since `max_num_bits <= 11`, the state always indexes within the 2048-entry
+    /// table, and the extra entries beyond `1 << max_num_bits` are never accessed.
     fn build_table_from_weights(&mut self) -> Result<(), HuffmanTableError> {
         use HuffmanTableError as err;
 
@@ -348,9 +381,11 @@ impl HuffmanTable {
             self.bit_ranks[(*num_bits) as usize] += 1;
         }
 
-        //fill with dummy symbols
+        // Always allocate TABLE_SIZE entries so the mask is a compile-time
+        // constant. Only the first `1 << max_bits` entries are meaningful;
+        // the rest are padding (zeroed symbol/num_bits).
         self.decode.resize(
-            1 << self.max_num_bits,
+            TABLE_SIZE,
             Entry {
                 symbol: 0,
                 num_bits: 0,
@@ -367,11 +402,12 @@ impl HuffmanTable {
                 + self.bit_ranks[bits as usize] as usize * (1 << (max_bits - bits));
         }
 
+        // rank_indexes[0] should equal `1 << max_bits`, not TABLE_SIZE
         assert!(
-            self.rank_indexes[0] == self.decode.len(),
+            self.rank_indexes[0] == 1 << max_bits,
             "rank_idx[0]: {} should be: {}",
             self.rank_indexes[0],
-            self.decode.len()
+            1 << max_bits
         );
 
         for symbol in 0..self.bits.len() {
