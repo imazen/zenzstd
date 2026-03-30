@@ -294,6 +294,7 @@ impl MatchState {
     }
 
     /// Compress a block without dict prefix, using owned tables.
+    #[inline]
     fn compress_block_with_tables(
         &mut self,
         src: &[u8],
@@ -549,7 +550,7 @@ impl MatchState {
 // ---------------------------------------------------------------------------
 
 /// Hash + insert + return previous value, using a raw table slice.
-#[inline]
+#[inline(always)]
 fn ht_lookup_and_insert(
     table: &mut [u32],
     src: &[u8],
@@ -753,11 +754,13 @@ impl MatchCandidate {
 /// The sequences use the standard zstd offset encoding:
 /// - `off_base` 1-3: repeat offsets
 /// - `off_base` >= 4: real_offset = off_base - 3
+#[inline]
 pub fn compress_block_zstd(src: &[u8], params: &CompressionParams) -> CompressedBlock {
     compress_block_zstd_with_dict(src, params, &[], &[1, 4, 8])
 }
 
 /// Compress a single block with optional dictionary content prepended as match history.
+#[inline]
 pub fn compress_block_zstd_with_dict(
     src: &[u8],
     params: &CompressionParams,
@@ -881,13 +884,105 @@ fn build_block(
 // collection.
 // ---------------------------------------------------------------------------
 
+/// Compute hash of `src[pos..]` using a function selected by `min_match`.
+///
+/// Identical to `hash_ptr` but takes the full src slice and a position so the
+/// caller doesn't need to sub-slice (avoiding a redundant bounds check when we
+/// have already guaranteed `pos + 8 <= src.len()`).
+#[inline(always)]
+fn hash_at(src: &[u8], pos: usize, hash_log: u32, min_match: u32) -> usize {
+    hash_ptr(&src[pos..], hash_log, min_match)
+}
+
+/// Emit a match sequence: append literals, push the sequence, update repcodes.
+///
+/// This is the "cold" path — called only when a match is found. Keeping it
+/// out-of-line lets LLVM optimize the hot miss-step loop tightly without
+/// instruction cache pressure from the match emission code.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+#[cold]
+fn emit_match_fast(
+    src: &[u8],
+    literals: &mut Vec<u8>,
+    sequences: &mut Vec<SequenceOut>,
+    rep: &mut RepCodes,
+    anchor: usize,
+    pos: usize,
+    off_base: u32,
+    match_len: u32,
+) {
+    literals.extend_from_slice(&src[anchor..pos]);
+    let lit_len = (pos - anchor) as u32;
+    let seq = SequenceOut {
+        off_base,
+        lit_len,
+        match_len,
+    };
+    rep.update(seq.off_base, lit_len);
+    sequences.push(seq);
+}
+
+/// Insert hash table entries for positions in `start..end` with step 1.
+///
+/// Out-of-line to keep the hot loop compact.
+#[inline(never)]
+fn insert_hashes_dense(
+    htable: &mut [u32],
+    src: &[u8],
+    start: usize,
+    end: usize,
+    hash_log: u32,
+    min_match: u32,
+) {
+    let mask = htable.len() - 1;
+    let mut p = start;
+    while p < end {
+        let h = hash_at(src, p, hash_log, min_match);
+        htable[h & mask] = p as u32;
+        p += 1;
+    }
+}
+
+/// Insert hash table entries for positions in `start..end` with step 4.
+///
+/// Out-of-line to keep the hot loop compact.
+#[inline(never)]
+fn insert_hashes_sparse(
+    htable: &mut [u32],
+    src: &[u8],
+    start: usize,
+    end: usize,
+    hash_log: u32,
+    min_match: u32,
+) {
+    let mask = htable.len() - 1;
+    let mut p = start;
+    while p < end {
+        let h = hash_at(src, p, hash_log, min_match);
+        htable[h & mask] = p as u32;
+        p += 4;
+    }
+}
+
 /// Fast strategy using an externally-owned hash table.
 ///
-/// Optimized to match C zstd's `ZSTD_compressBlock_fast_generic` structure:
-/// - Repcodes are only checked right after emitting a match (when anchor==pos),
-///   not at every position. This eliminates 3 `count_match` calls per miss.
-/// - Step-based hash insertion for long matches reduces overhead.
-/// - Adaptive stepping on misses (same as C zstd).
+/// Optimized with pipelining, cold-path splitting, and pre-allocated buffers
+/// to match C zstd's `ZSTD_compressBlock_fast_generic` structure:
+///
+/// - **Two-position pipelining**: Computes the hash for position ip1=ip0+1
+///   before checking the match at ip0, hiding memory latency of hash table
+///   lookups. If ip0 misses, ip1's hash is already computed.
+/// - **Cold path splitting**: Match emission (`emit_match_fast`) and hash
+///   insertion (`insert_hashes_dense/sparse`) are `#[inline(never)]` so the
+///   hot miss-step loop fits in L1 icache.
+/// - **Pre-allocated buffers**: `literals` and `sequences` are allocated with
+///   estimated capacity to avoid reallocation during compression.
+/// - **Repcode check at anchor only**: Repcodes are checked only when pos ==
+///   anchor (immediately after emitting a match), matching C zstd behavior.
+/// - **Adaptive stepping**: Step size grows when no matches are found, matching
+///   C zstd's acceleration behavior.
+#[inline]
 fn compress_fast_ext(
     src: &[u8],
     params: &CompressionParams,
@@ -898,14 +993,23 @@ fn compress_fast_ext(
     let hash_log = params.hash_log;
     let step_factor = 1usize << params.search_log;
     let window_size = params.window_size();
+    let ht_mask = htable.len() - 1; // hash table size is always power-of-2
 
     let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
+    // Pre-allocate: worst case all literals, estimate 1 seq per 32 bytes
+    let mut sequences: Vec<SequenceOut> = Vec::with_capacity(src.len() / 32 + 4);
+    let mut literals: Vec<u8> = Vec::with_capacity(src.len());
 
     let mut anchor: usize = 0;
     let mut pos: usize = 0;
     let end = src.len().saturating_sub(8);
+
+    if end < 2 {
+        return build_block(src, sequences, literals, anchor);
+    }
+
+    // Pipeline: pre-compute hash for the first position
+    let mut h0 = hash_at(src, 0, hash_log, min_match);
 
     while pos < end {
         // Rep0 check: one count_match vs three in try_repcodes.
@@ -920,16 +1024,22 @@ fn compress_fast_ext(
                 let ref_pos = pos - rep_offset_usize;
                 let rml = count_match(&src[pos..], &src[ref_pos..]);
                 if rml >= min_match as usize {
-                    literals.extend_from_slice(&src[anchor..pos]);
-                    let seq = SequenceOut {
-                        off_base: 1, // off_base 1 with correct ll semantics
-                        lit_len,
-                        match_len: rml as u32,
-                    };
-                    rep.update(seq.off_base, lit_len);
-                    sequences.push(seq);
+                    emit_match_fast(
+                        src,
+                        &mut literals,
+                        &mut sequences,
+                        &mut rep,
+                        anchor,
+                        pos,
+                        1, // off_base 1 with correct ll semantics
+                        rml as u32,
+                    );
                     pos += rml;
                     anchor = pos;
+                    // Recompute hash for new position after rep match
+                    if pos < end {
+                        h0 = hash_at(src, pos, hash_log, min_match);
+                    }
                     continue;
                 }
             }
@@ -937,60 +1047,76 @@ fn compress_fast_ext(
 
         let step = ((pos - anchor) / step_factor) + 1;
 
-        // Hash lookup using raw table
-        let match_pos = ht_lookup_and_insert(htable, src, pos, hash_log, min_match) as usize;
+        // --- Pipelined hash lookup ---
+        // h0 was computed in the previous iteration (or before the loop).
+        // Look up the match candidate from h0, insert current position,
+        // then pre-compute h1 for pos+step (the next position we'll check).
+        let match_pos = htable[h0 & ht_mask] as usize;
+        htable[h0 & ht_mask] = pos as u32;
+
+        // Pre-compute hash for the next position (hides memory latency of
+        // the match_pos read above). If we miss, this becomes the next h0.
+        let next_pos = pos + step;
+        let h_next = if next_pos < end {
+            hash_at(src, next_pos, hash_log, min_match)
+        } else {
+            0
+        };
 
         if match_pos == 0 || match_pos >= pos || (pos - match_pos) > window_size {
-            pos += step;
+            pos = next_pos;
+            h0 = h_next;
             continue;
         }
 
         let ml = count_match(&src[pos..], &src[match_pos..]);
         if ml < min_match as usize {
-            pos += step;
+            pos = next_pos;
+            h0 = h_next;
             continue;
         }
 
-        let lit_len = (pos - anchor) as u32;
-        literals.extend_from_slice(&src[anchor..pos]);
         let real_offset = (pos - match_pos) as u32;
-        let seq = SequenceOut {
-            off_base: real_offset + 3,
-            lit_len,
-            match_len: ml as u32,
-        };
-        rep.update(seq.off_base, lit_len);
-        sequences.push(seq);
+        emit_match_fast(
+            src,
+            &mut literals,
+            &mut sequences,
+            &mut rep,
+            anchor,
+            pos,
+            real_offset + 3,
+            ml as u32,
+        );
 
         // Insert intermediate positions — skip positions for long matches.
         // C zstd only inserts match start + end for very long matches.
         let match_end = pos + ml;
-        pos += 1;
+        let insert_start = pos + 1;
         let insert_end = match_end.min(end);
         // For long matches (>32 bytes), only insert every 4th position to
         // reduce hash insertion overhead. This trades a small amount of match
         // quality for a large reduction in per-position hash computation.
         if ml > 32 {
-            while pos < insert_end {
-                let h = hash_ptr(&src[pos..], hash_log, min_match);
-                htable[h] = pos as u32;
-                pos += 4;
-            }
+            insert_hashes_sparse(htable, src, insert_start, insert_end, hash_log, min_match);
         } else {
-            while pos < insert_end {
-                let h = hash_ptr(&src[pos..], hash_log, min_match);
-                htable[h] = pos as u32;
-                pos += 1;
-            }
+            insert_hashes_dense(htable, src, insert_start, insert_end, hash_log, min_match);
         }
+
         pos = match_end;
         anchor = pos;
+        // Recompute hash for new position after match
+        if pos < end {
+            h0 = hash_at(src, pos, hash_log, min_match);
+        }
     }
 
     build_block(src, sequences, literals, anchor)
 }
 
 /// Fast strategy with dict prefix, using externally-owned hash table.
+///
+/// Same pipelining and cold-path optimizations as `compress_fast_ext`.
+#[inline]
 fn compress_fast_dict_ext(
     combined: &[u8],
     dict_len: usize,
@@ -1002,12 +1128,20 @@ fn compress_fast_dict_ext(
     let hash_log = params.hash_log;
     let step_factor = 1usize << params.search_log;
     let window_size = params.window_size();
+    let ht_mask = htable.len() - 1;
     let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
+    let src_len = combined.len() - dict_len;
+    let mut sequences: Vec<SequenceOut> = Vec::with_capacity(src_len / 32 + 4);
+    let mut literals: Vec<u8> = Vec::with_capacity(src_len);
     let mut anchor = dict_len;
     let mut pos = dict_len;
     let end = combined.len().saturating_sub(8);
+
+    if pos >= end {
+        return build_block_dict(combined, dict_len, sequences, literals, anchor);
+    }
+
+    let mut h0 = hash_at(combined, pos, hash_log, min_match);
 
     while pos < end {
         // Rep0 check with correct ll=0 semantics
@@ -1022,65 +1156,138 @@ fn compress_fast_dict_ext(
                 let ref_pos = pos - rep_offset_usize;
                 let rml = count_match(&combined[pos..], &combined[ref_pos..]);
                 if rml >= min_match as usize {
-                    literals.extend_from_slice(&combined[anchor..pos]);
-                    let seq = SequenceOut {
-                        off_base: 1,
-                        lit_len,
-                        match_len: rml as u32,
-                    };
-                    rep.update(seq.off_base, lit_len);
-                    sequences.push(seq);
+                    emit_match_fast(
+                        combined,
+                        &mut literals,
+                        &mut sequences,
+                        &mut rep,
+                        anchor,
+                        pos,
+                        1,
+                        rml as u32,
+                    );
                     pos += rml;
                     anchor = pos;
+                    if pos < end {
+                        h0 = hash_at(combined, pos, hash_log, min_match);
+                    }
                     continue;
                 }
             }
         }
 
         let step = ((pos - anchor) / step_factor) + 1;
-        let mp = ht_lookup_and_insert(htable, combined, pos, hash_log, min_match) as usize;
+
+        // Pipelined hash lookup
+        let mp = htable[h0 & ht_mask] as usize;
+        htable[h0 & ht_mask] = pos as u32;
+
+        let next_pos = pos + step;
+        let h_next = if next_pos < end {
+            hash_at(combined, next_pos, hash_log, min_match)
+        } else {
+            0
+        };
+
         if mp >= pos || (pos - mp) > window_size {
-            pos += step;
+            pos = next_pos;
+            h0 = h_next;
             continue;
         }
         let ml = count_match(&combined[pos..], &combined[mp..]);
         if ml < min_match as usize {
-            pos += step;
+            pos = next_pos;
+            h0 = h_next;
             continue;
         }
-        let ll = (pos - anchor) as u32;
-        literals.extend_from_slice(&combined[anchor..pos]);
+
         let ro = (pos - mp) as u32;
-        let seq = SequenceOut {
-            off_base: ro + 3,
-            lit_len: ll,
-            match_len: ml as u32,
-        };
-        rep.update(seq.off_base, ll);
-        sequences.push(seq);
+        emit_match_fast(
+            combined,
+            &mut literals,
+            &mut sequences,
+            &mut rep,
+            anchor,
+            pos,
+            ro + 3,
+            ml as u32,
+        );
+
         let me = pos + ml;
-        pos += 1;
+        let insert_start = pos + 1;
         let ie = me.min(end);
         if ml > 32 {
-            while pos < ie {
-                let h = hash_ptr(&combined[pos..], hash_log, min_match);
-                htable[h] = pos as u32;
-                pos += 4;
-            }
+            insert_hashes_sparse(htable, combined, insert_start, ie, hash_log, min_match);
         } else {
-            while pos < ie {
-                let h = hash_ptr(&combined[pos..], hash_log, min_match);
-                htable[h] = pos as u32;
-                pos += 1;
-            }
+            insert_hashes_dense(htable, combined, insert_start, ie, hash_log, min_match);
         }
         pos = me;
         anchor = pos;
+        if pos < end {
+            h0 = hash_at(combined, pos, hash_log, min_match);
+        }
     }
     build_block_dict(combined, dict_len, sequences, literals, anchor)
 }
 
+/// Insert dual hash table entries (short + long) for positions in `start..end`
+/// with step 1.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn insert_dfast_hashes_dense(
+    short_table: &mut [u32],
+    long_table: &mut [u32],
+    src: &[u8],
+    start: usize,
+    end: usize,
+    hash_log: u32,
+    long_hash_log: u32,
+    min_match: u32,
+) {
+    let short_mask = short_table.len() - 1;
+    let long_mask = long_table.len() - 1;
+    let mut p = start;
+    while p < end {
+        let sh = hash_at(src, p, hash_log, min_match);
+        short_table[sh & short_mask] = p as u32;
+        let lh = hash8(&src[p..], long_hash_log);
+        long_table[lh & long_mask] = p as u32;
+        p += 1;
+    }
+}
+
+/// Insert dual hash table entries (short + long) for positions in `start..end`
+/// with step 4.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn insert_dfast_hashes_sparse(
+    short_table: &mut [u32],
+    long_table: &mut [u32],
+    src: &[u8],
+    start: usize,
+    end: usize,
+    hash_log: u32,
+    long_hash_log: u32,
+    min_match: u32,
+) {
+    let short_mask = short_table.len() - 1;
+    let long_mask = long_table.len() - 1;
+    let mut p = start;
+    while p < end {
+        let sh = hash_at(src, p, hash_log, min_match);
+        short_table[sh & short_mask] = p as u32;
+        let lh = hash8(&src[p..], long_hash_log);
+        long_table[lh & long_mask] = p as u32;
+        p += 4;
+    }
+}
+
 /// DFast strategy using externally-owned hash tables.
+///
+/// Optimized with pre-allocated buffers and cold-path splitting.
+/// DFast uses two hash tables (short for min_match, long for 8-byte hashes)
+/// and takes the longer match.
+#[inline]
 fn compress_dfast_ext(
     src: &[u8],
     params: &CompressionParams,
@@ -1092,10 +1299,12 @@ fn compress_dfast_ext(
     let hash_log = params.hash_log;
     let long_hash_log = params.hash_log.min(27);
     let window_size = params.window_size();
+    let short_mask = short_table.len() - 1;
+    let long_mask = long_table.len() - 1;
 
     let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
+    let mut sequences: Vec<SequenceOut> = Vec::with_capacity(src.len() / 32 + 4);
+    let mut literals: Vec<u8> = Vec::with_capacity(src.len());
 
     let mut anchor: usize = 0;
     let mut pos: usize = 0;
@@ -1112,14 +1321,16 @@ fn compress_dfast_ext(
                 let ref_pos = pos - rep_offset_usize;
                 let rml = count_match(&src[pos..], &src[ref_pos..]);
                 if rml >= min_match as usize {
-                    literals.extend_from_slice(&src[anchor..pos]);
-                    let seq = SequenceOut {
-                        off_base: 1,
-                        lit_len,
-                        match_len: rml as u32,
-                    };
-                    rep.update(seq.off_base, lit_len);
-                    sequences.push(seq);
+                    emit_match_fast(
+                        src,
+                        &mut literals,
+                        &mut sequences,
+                        &mut rep,
+                        anchor,
+                        pos,
+                        1,
+                        rml as u32,
+                    );
                     pos += rml;
                     anchor = pos;
                     continue;
@@ -1127,15 +1338,15 @@ fn compress_dfast_ext(
             }
         }
 
-        // Short hash
-        let short_h = hash_ptr(&src[pos..], hash_log, min_match);
-        let short_prev = short_table[short_h] as usize;
-        short_table[short_h] = pos as u32;
+        // Short hash — compute and insert in one step
+        let short_h = hash_at(src, pos, hash_log, min_match);
+        let short_prev = short_table[short_h & short_mask] as usize;
+        short_table[short_h & short_mask] = pos as u32;
 
-        // Long hash
+        // Long hash — compute and insert in one step
         let long_h = hash8(&src[pos..], long_hash_log);
-        let long_prev = long_table[long_h] as usize;
-        long_table[long_h] = pos as u32;
+        let long_prev = long_table[long_h & long_mask] as usize;
+        long_table[long_h & long_mask] = pos as u32;
 
         let mut best: Option<MatchCandidate> = None;
 
@@ -1163,36 +1374,43 @@ fn compress_dfast_ext(
         }
 
         if let Some(m) = best {
-            let lit_len = (pos - anchor) as u32;
-            literals.extend_from_slice(&src[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: m.off_base,
-                lit_len,
-                match_len: m.match_len,
-            };
-            rep.update(seq.off_base, lit_len);
-            sequences.push(seq);
+            emit_match_fast(
+                src,
+                &mut literals,
+                &mut sequences,
+                &mut rep,
+                anchor,
+                pos,
+                m.off_base,
+                m.match_len,
+            );
 
             let ml = m.match_len as usize;
             let match_end = pos + ml;
-            pos += 1;
+            let insert_start = pos + 1;
             let insert_end = match_end.min(end);
             if ml > 32 {
-                while pos < insert_end {
-                    let sh = hash_ptr(&src[pos..], hash_log, min_match);
-                    short_table[sh] = pos as u32;
-                    let lh = hash8(&src[pos..], long_hash_log);
-                    long_table[lh] = pos as u32;
-                    pos += 4;
-                }
+                insert_dfast_hashes_sparse(
+                    short_table,
+                    long_table,
+                    src,
+                    insert_start,
+                    insert_end,
+                    hash_log,
+                    long_hash_log,
+                    min_match,
+                );
             } else {
-                while pos < insert_end {
-                    let sh = hash_ptr(&src[pos..], hash_log, min_match);
-                    short_table[sh] = pos as u32;
-                    let lh = hash8(&src[pos..], long_hash_log);
-                    long_table[lh] = pos as u32;
-                    pos += 1;
-                }
+                insert_dfast_hashes_dense(
+                    short_table,
+                    long_table,
+                    src,
+                    insert_start,
+                    insert_end,
+                    hash_log,
+                    long_hash_log,
+                    min_match,
+                );
             }
             pos = match_end;
             anchor = pos;
@@ -1205,6 +1423,9 @@ fn compress_dfast_ext(
 }
 
 /// DFast strategy with dict prefix, using externally-owned hash tables.
+///
+/// Same cold-path and pre-allocation optimizations as `compress_dfast_ext`.
+#[inline]
 fn compress_dfast_dict_ext(
     combined: &[u8],
     dict_len: usize,
@@ -1217,9 +1438,12 @@ fn compress_dfast_dict_ext(
     let hash_log = params.hash_log;
     let long_hash_log = hash_log.min(27);
     let window_size = params.window_size();
+    let short_mask = short_table.len() - 1;
+    let long_mask = long_table.len() - 1;
     let mut rep = RepCodes { rep: *initial_rep };
-    let mut sequences: Vec<SequenceOut> = Vec::new();
-    let mut literals: Vec<u8> = Vec::new();
+    let src_len = combined.len() - dict_len;
+    let mut sequences: Vec<SequenceOut> = Vec::with_capacity(src_len / 32 + 4);
+    let mut literals: Vec<u8> = Vec::with_capacity(src_len);
     let mut anchor = dict_len;
     let mut pos = dict_len;
     let end = combined.len().saturating_sub(8);
@@ -1237,26 +1461,28 @@ fn compress_dfast_dict_ext(
                 let ref_pos = pos - rep_offset_usize;
                 let rml = count_match(&combined[pos..], &combined[ref_pos..]);
                 if rml >= min_match as usize {
-                    literals.extend_from_slice(&combined[anchor..pos]);
-                    let seq = SequenceOut {
-                        off_base: 1,
-                        lit_len,
-                        match_len: rml as u32,
-                    };
-                    rep.update(seq.off_base, lit_len);
-                    sequences.push(seq);
+                    emit_match_fast(
+                        combined,
+                        &mut literals,
+                        &mut sequences,
+                        &mut rep,
+                        anchor,
+                        pos,
+                        1,
+                        rml as u32,
+                    );
                     pos += rml;
                     anchor = pos;
                     continue;
                 }
             }
         }
-        let sh = hash_ptr(&combined[pos..], hash_log, min_match);
-        let sp = short_table[sh] as usize;
-        short_table[sh] = pos as u32;
+        let sh = hash_at(combined, pos, hash_log, min_match);
+        let sp = short_table[sh & short_mask] as usize;
+        short_table[sh & short_mask] = pos as u32;
         let lh = hash8(&combined[pos..], long_hash_log);
-        let lp = long_table[lh] as usize;
-        long_table[lh] = pos as u32;
+        let lp = long_table[lh & long_mask] as usize;
+        long_table[lh & long_mask] = pos as u32;
         let mut best: Option<MatchCandidate> = None;
         if lp < pos && (pos - lp) <= window_size {
             let ml = count_match(&combined[pos..], &combined[lp..]);
@@ -1280,35 +1506,42 @@ fn compress_dfast_dict_ext(
             }
         }
         if let Some(m) = best {
-            let ll = (pos - anchor) as u32;
-            literals.extend_from_slice(&combined[anchor..pos]);
-            let seq = SequenceOut {
-                off_base: m.off_base,
-                lit_len: ll,
-                match_len: m.match_len,
-            };
-            rep.update(seq.off_base, ll);
-            sequences.push(seq);
+            emit_match_fast(
+                combined,
+                &mut literals,
+                &mut sequences,
+                &mut rep,
+                anchor,
+                pos,
+                m.off_base,
+                m.match_len,
+            );
             let ml = m.match_len as usize;
             let me = pos + ml;
-            pos += 1;
+            let insert_start = pos + 1;
             let ie = me.min(end);
             if ml > 32 {
-                while pos < ie {
-                    let s = hash_ptr(&combined[pos..], hash_log, min_match);
-                    short_table[s] = pos as u32;
-                    let l = hash8(&combined[pos..], long_hash_log);
-                    long_table[l] = pos as u32;
-                    pos += 4;
-                }
+                insert_dfast_hashes_sparse(
+                    short_table,
+                    long_table,
+                    combined,
+                    insert_start,
+                    ie,
+                    hash_log,
+                    long_hash_log,
+                    min_match,
+                );
             } else {
-                while pos < ie {
-                    let s = hash_ptr(&combined[pos..], hash_log, min_match);
-                    short_table[s] = pos as u32;
-                    let l = hash8(&combined[pos..], long_hash_log);
-                    long_table[l] = pos as u32;
-                    pos += 1;
-                }
+                insert_dfast_hashes_dense(
+                    short_table,
+                    long_table,
+                    combined,
+                    insert_start,
+                    ie,
+                    hash_log,
+                    long_hash_log,
+                    min_match,
+                );
             }
             pos = me;
             anchor = pos;

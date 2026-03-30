@@ -96,8 +96,10 @@ pub fn compress_level<M: Matcher>(
         return;
     }
 
-    // Encode the compressed block
-    let mut compressed = Vec::new();
+    // Encode the compressed block — pre-allocate with estimated capacity.
+    // Typical compression ratio at L1 is ~0.5, so compressed size is roughly
+    // half the input. We allocate input size to avoid reallocation.
+    let mut compressed = Vec::with_capacity(uncompressed_data.len());
     encode_compressed_block(
         &compressed_block.literals,
         &compressed_block.sequences,

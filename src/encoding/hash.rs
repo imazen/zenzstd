@@ -176,7 +176,7 @@ pub fn hash_ptr(data: &[u8], hash_bits: u32, min_match_len: u32) -> usize {
 /// let b = [1, 2, 3, 4, 5, 77, 88];
 /// // count_match would return 5
 /// ```
-#[inline]
+#[inline(always)]
 pub fn count_match(a: &[u8], b: &[u8]) -> usize {
     super::simd::count_match(a, b)
 }

@@ -26,7 +26,7 @@
 /// When the `simd` feature is enabled on x86_64, this dispatches to a 32-byte
 /// AVX2 vector comparison path via `incant!`. On other platforms or without the
 /// `simd` feature, falls back to 8-byte scalar chunking.
-#[inline]
+#[inline(always)]
 pub fn count_match(a: &[u8], b: &[u8]) -> usize {
     #[cfg(feature = "simd")]
     {
