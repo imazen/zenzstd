@@ -652,11 +652,25 @@ pub fn decode_and_execute_sequences(
         // on supporting CPUs, giving LLVM access to TZCNT, PDEP/PEXT, and wider copies.
         #[cfg(feature = "simd")]
         {
-            archmage::incant!(fused_decode_execute_fast_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer))
+            archmage::incant!(fused_decode_execute_fast_inner(
+                section,
+                &mut br,
+                fse,
+                buffer,
+                offset_hist,
+                literals_buffer
+            ))
         }
         #[cfg(not(feature = "simd"))]
         {
-            fused_decode_execute_fast_inner(section, &mut br, fse, buffer, offset_hist, literals_buffer)
+            fused_decode_execute_fast_inner(
+                section,
+                &mut br,
+                fse,
+                buffer,
+                offset_hist,
+                literals_buffer,
+            )
         }
     }
 }
@@ -854,12 +868,7 @@ fn fused_decode_execute_fast_inner(
                     unsafe_ops::fill_buf(&mut buffer.buffer.buf, pos, ml, byte);
                 } else {
                     // Overlapping: doubling copy
-                    unsafe_ops::copy_within_buf(
-                        &mut buffer.buffer.buf,
-                        src_abs,
-                        pos,
-                        distance,
-                    );
+                    unsafe_ops::copy_within_buf(&mut buffer.buffer.buf, src_abs, pos, distance);
                     let mut written = distance;
                     while written < ml {
                         let copy_len = written.min(ml - written);

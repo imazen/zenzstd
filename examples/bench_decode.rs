@@ -18,8 +18,11 @@ fn make_mixed(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
     let mut i = 0u32;
     while data.len() < size {
-        if i % 100 < 50 { data.push(b'A' + (i % 26) as u8); }
-        else { data.push(((i.wrapping_mul(2654435761) >> 16) & 0xFF) as u8); }
+        if i % 100 < 50 {
+            data.push(b'A' + (i % 26) as u8);
+        } else {
+            data.push(((i.wrapping_mul(2654435761) >> 16) & 0xFF) as u8);
+        }
         i += 1;
     }
     data
@@ -29,7 +32,9 @@ fn make_random(size: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(size);
     let mut s = 0x12345678u64;
     for _ in 0..size {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         data.push((s >> 33) as u8);
     }
     data
@@ -82,9 +87,13 @@ fn bench_decode(name: &str, data: &[u8], level: i32) {
     let gap = c_mbps / zen_mbps;
     eprintln!(
         "{:<20} L{:<2}  {:>6} -> {:>6} bytes  zen:{:>7.0} MB/s  c:{:>7.0} MB/s  gap:{:.2}x  zen_sz:{:>6}",
-        name, level,
-        data.len(), c_compressed.len(),
-        zen_mbps, c_mbps, gap,
+        name,
+        level,
+        data.len(),
+        c_compressed.len(),
+        zen_mbps,
+        c_mbps,
+        gap,
         zen_compressed.len(),
     );
 }
@@ -96,8 +105,10 @@ fn main() {
     let mixed_1m = make_mixed(1_000_000);
 
     eprintln!("=== L3 (default) decode benchmark ===");
-    eprintln!("{:<20} {:>3}  {:>15}  {:>14}  {:>14}  {:>5}  {:>10}",
-        "DATASET", "LVL", "SIZE", "DEC_ZEN", "DEC_C", "GAP", "ZEN_SZ");
+    eprintln!(
+        "{:<20} {:>3}  {:>15}  {:>14}  {:>14}  {:>5}  {:>10}",
+        "DATASET", "LVL", "SIZE", "DEC_ZEN", "DEC_C", "GAP", "ZEN_SZ"
+    );
     eprintln!("{}", "-".repeat(95));
 
     bench_decode("text_100k", &text_100k, 3);

@@ -190,10 +190,7 @@ fn golden_decompression_zero_seq_2b() {
     let decoded = our_decompress(&compressed);
     let mut c_decoded = alloc::vec::Vec::new();
     zstd::stream::copy_decode(compressed.as_slice(), &mut c_decoded).unwrap();
-    assert_eq!(
-        decoded, c_decoded,
-        "zeroSeq_2B output differs from C zstd"
-    );
+    assert_eq!(decoded, c_decoded, "zeroSeq_2B output differs from C zstd");
 }
 
 // ===================================================================
@@ -221,7 +218,8 @@ fn golden_decompression_errors_all() {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let p = e.path();
-            p.extension().is_some_and(|ext| ext == "zst" || ext == "bin")
+            p.extension()
+                .is_some_and(|ext| ext == "zst" || ext == "bin")
                 || p.file_name()
                     .is_some_and(|n| n.to_string_lossy().ends_with(".bin.zst"))
         })
@@ -303,7 +301,9 @@ fn golden_error_off0() {
             let mut c_decoded = alloc::vec::Vec::new();
             if zstd::stream::copy_decode(compressed.as_slice(), &mut c_decoded).is_err() {
                 // C zstd also rejects -- we have a conformance gap
-                std::println!("    NOTE: off0.bin.zst accepted by our decoder but rejected by C zstd");
+                std::println!(
+                    "    NOTE: off0.bin.zst accepted by our decoder but rejected by C zstd"
+                );
             }
         }
         Err(_) => panic!("Decoder panicked on off0.bin.zst"),
@@ -313,10 +313,9 @@ fn golden_error_off0() {
 #[test]
 fn golden_error_truncated_huff_state() {
     extern crate std;
-    let compressed = std::fs::read(
-        "./vendor/zstd/tests/golden-decompression-errors/truncated_huff_state.zst",
-    )
-    .unwrap();
+    let compressed =
+        std::fs::read("./vendor/zstd/tests/golden-decompression-errors/truncated_huff_state.zst")
+            .unwrap();
     let result = std::panic::catch_unwind(|| try_our_decompress(&compressed));
     match result {
         Ok(Err(_)) => {} // expected
@@ -384,16 +383,11 @@ fn golden_compression_roundtrip() {
         }
         let name = alloc::string::ToString::to_string(&path.file_name().unwrap().to_string_lossy());
         let original = std::fs::read(&path).unwrap();
-        println!(
-            "  golden compression: {} ({} bytes)",
-            name,
-            original.len()
-        );
+        println!("  golden compression: {} ({} bytes)", name, original.len());
 
         // Test with C zstd at multiple levels
         for level in [1, 3, 9] {
-            let c_compressed =
-                zstd::stream::encode_all(original.as_slice(), level).unwrap();
+            let c_compressed = zstd::stream::encode_all(original.as_slice(), level).unwrap();
             let decoded = our_decompress(&c_compressed);
             assert_eq!(
                 original, decoded,
@@ -476,7 +470,10 @@ fn golden_dictionary_roundtrip() {
     );
 
     // Compress with C zstd using the dictionary
-    let c_compressed = zstd::stream::encode_all(std::io::Cursor::new(&original), 3).unwrap();
+    let c_compressed = {
+        let mut compressor = zstd::bulk::Compressor::with_dictionary(3, &dict_raw).unwrap();
+        compressor.compress(&original).unwrap()
+    };
 
     println!(
         "  C zstd compressed with dict: {} bytes",
@@ -491,11 +488,14 @@ fn golden_dictionary_roundtrip() {
             // Log it and verify the dictionary is at least parseable by C zstd.
             println!("    NOTE: our dictionary parser rejected this dict: {e:?}");
             println!("    Verifying C zstd can round-trip with this dictionary...");
-            let mut c_decompressor =
-                zstd::bulk::Decompressor::with_dictionary(&dict_raw).unwrap();
-            let c_decoded = c_decompressor.decompress(&c_compressed, original.len() * 2).unwrap();
+            let mut c_decompressor = zstd::bulk::Decompressor::with_dictionary(&dict_raw).unwrap();
+            let c_decoded = c_decompressor
+                .decompress(&c_compressed, original.len() * 2)
+                .unwrap();
             assert_eq!(original, c_decoded, "C zstd dict round-trip failed");
-            println!("    OK: C zstd dict round-trip succeeded (our decoder has a known limitation)");
+            println!(
+                "    OK: C zstd dict round-trip succeeded (our decoder has a known limitation)"
+            );
             return;
         }
     };
@@ -506,10 +506,7 @@ fn golden_dictionary_roundtrip() {
     let mut source = c_compressed.as_slice();
     frame_dec.reset(&mut source).unwrap();
     frame_dec
-        .decode_blocks(
-            &mut source,
-            crate::decoding::BlockDecodingStrategy::All,
-        )
+        .decode_blocks(&mut source, crate::decoding::BlockDecodingStrategy::All)
         .unwrap();
     let decoded = frame_dec.collect().unwrap();
 
@@ -606,10 +603,7 @@ fn cross_roundtrip_all_levels_all_sizes() {
         for level in 1..=22 {
             if let Some(compressed) = try_our_compress(&data, level) {
                 let decoded = our_decompress(&compressed);
-                assert_eq!(
-                    data, decoded,
-                    "our->our mismatch: {name} L{level}"
-                );
+                assert_eq!(data, decoded, "our->our mismatch: {name} L{level}");
             }
         }
 
@@ -619,10 +613,7 @@ fn cross_roundtrip_all_levels_all_sizes() {
                 let mut c_decoded = Vec::new();
                 match zstd::stream::copy_decode(compressed.as_slice(), &mut c_decoded) {
                     Ok(()) => {
-                        assert_eq!(
-                            data, c_decoded,
-                            "our->C mismatch: {name} L{level}"
-                        );
+                        assert_eq!(data, c_decoded, "our->C mismatch: {name} L{level}");
                     }
                     Err(e) => {
                         let err_str = std::format!("{e:?}");
@@ -636,13 +627,9 @@ fn cross_roundtrip_all_levels_all_sizes() {
 
         // C zstd encoder -> our decoder -> verify
         for level in [1, 3, 5, 9, 15, 19, 22] {
-            let c_compressed =
-                zstd::stream::encode_all(data.as_slice(), level).unwrap();
+            let c_compressed = zstd::stream::encode_all(data.as_slice(), level).unwrap();
             let decoded = our_decompress(&c_compressed);
-            assert_eq!(
-                data, decoded,
-                "C->our mismatch: {name} C_L{level}"
-            );
+            assert_eq!(data, decoded, "C->our mismatch: {name} C_L{level}");
         }
     }
     println!("  cross_roundtrip_all_levels_all_sizes: all passed");
@@ -662,7 +649,10 @@ fn c_zstd_all_levels_decompress() {
 
     let patterns: Vec<(&str, Vec<u8>)> = alloc::vec![
         ("zeros_64k", vec![0u8; 65536]),
-        ("sequential_64k", (0..65536u32).map(|i| (i % 256) as u8).collect()),
+        (
+            "sequential_64k",
+            (0..65536u32).map(|i| (i % 256) as u8).collect()
+        ),
         ("repeating_text", {
             let phrase = b"The quick brown fox jumps over the lazy dog. ";
             let mut v = Vec::new();
@@ -681,8 +671,7 @@ fn c_zstd_all_levels_decompress() {
 
     for (name, data) in &patterns {
         for level in 1..=22 {
-            let compressed =
-                zstd::stream::encode_all(data.as_slice(), level).unwrap();
+            let compressed = zstd::stream::encode_all(data.as_slice(), level).unwrap();
             let decoded = our_decompress(&compressed);
             assert_eq!(
                 data.as_slice(),

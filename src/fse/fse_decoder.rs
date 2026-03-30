@@ -462,7 +462,10 @@ impl<'t> SeqFSEDecoder<'t> {
 /// `code_table` maps symbol code -> (base_value, extra_bits).
 /// For LL this is LL_CODE_TABLE, for ML this is ML_CODE_TABLE.
 /// For OF, base_value = (1 << code) and extra_bits = code.
-pub fn build_seq_table(fse_table: &FSETable, code_table: &[(u32, u8)]) -> alloc::vec::Vec<SeqEntry> {
+pub fn build_seq_table(
+    fse_table: &FSETable,
+    code_table: &[(u32, u8)],
+) -> alloc::vec::Vec<SeqEntry> {
     let mut seq = alloc::vec::Vec::with_capacity(fse_table.decode.len());
     for entry in &fse_table.decode {
         let (base_value, extra_bits) = if (entry.symbol as usize) < code_table.len() {

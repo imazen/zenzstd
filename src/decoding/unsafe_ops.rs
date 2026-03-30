@@ -20,11 +20,7 @@ pub fn copy_to_buf(dst: &mut [u8], pos: usize, src: &[u8]) {
         // via the reserve(MAX_BLOCK_SIZE) at the top of the decode loop.
         #[allow(unsafe_code)]
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                src.as_ptr(),
-                dst.as_mut_ptr().add(pos),
-                src.len(),
-            );
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().add(pos), src.len());
         }
     }
     #[cfg(not(feature = "unsafe-decompress"))]
@@ -68,7 +64,9 @@ pub fn read_byte(buf: &[u8], pos: usize) -> u8 {
     {
         // SAFETY: caller guarantees pos < buf.len()
         #[allow(unsafe_code)]
-        unsafe { *buf.get_unchecked(pos) }
+        unsafe {
+            *buf.get_unchecked(pos)
+        }
     }
     #[cfg(not(feature = "unsafe-decompress"))]
     {

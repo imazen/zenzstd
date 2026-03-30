@@ -97,9 +97,13 @@ fn decompress_literals(
 
         for stream in &[stream1, stream2, stream3, stream4] {
             #[cfg(feature = "simd")]
-            { archmage::incant!(decode_huffman_stream(stream, &scratch.table, target))?; }
+            {
+                archmage::incant!(decode_huffman_stream(stream, &scratch.table, target))?;
+            }
             #[cfg(not(feature = "simd"))]
-            { decode_huffman_stream(stream, &scratch.table, target)?; }
+            {
+                decode_huffman_stream(stream, &scratch.table, target)?;
+            }
         }
 
         bytes_read += source.len() as u32;
@@ -107,9 +111,13 @@ fn decompress_literals(
         //just decode the one stream
         assert!(num_streams == 1);
         #[cfg(feature = "simd")]
-        { archmage::incant!(decode_huffman_stream(source, &scratch.table, target))?; }
+        {
+            archmage::incant!(decode_huffman_stream(source, &scratch.table, target))?;
+        }
         #[cfg(not(feature = "simd"))]
-        { decode_huffman_stream(source, &scratch.table, target)?; }
+        {
+            decode_huffman_stream(source, &scratch.table, target)?;
+        }
         bytes_read += source.len() as u32;
     }
 
