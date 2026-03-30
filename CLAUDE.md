@@ -9,7 +9,7 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
   - `zstd_match.rs` — Core match finder: Fast, DFast, Greedy, Lazy, Lazy2, BtLazy2, BtOpt/BtUltra/BtUltra2 strategies
   - `compress_params.rs` — All 4 zstd compression parameter tables (default/256K/128K/16K)
   - `hash.rs` — zstd hash functions (hash4-hash8 matching C primes)
-  - `simd.rs` — SIMD-accelerated count_match (archmage optional)
+  - `simd.rs` — AVX2 count_match (32B/iter via archmage incant!), 4-way histogram
   - `blocks/compressed.rs` — Sequence/literal encoding (FSE + Huffman)
   - `streaming_encoder.rs` — `impl std::io::Write` streaming encoder
   - `levels/zstd_levels.rs` — Level dispatch bridging match finder to block encoder
@@ -23,14 +23,37 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 - `#![forbid(unsafe_code)]` — all code is safe Rust
 - `#![no_std]` with alloc — std is optional
 - Safe ringbuffer using Vec<u8> with power-of-2 capacity bitmask
-- BT* strategies (levels 13-22) use a binary tree match finder (DUBT-style)
-- BtLazy2 uses binary tree + lazy2 evaluation
-- BtOpt/BtUltra/BtUltra2 use price-based optimal parsing (forward price table + backward trace, following C zstd's `ZSTD_compressBlock_opt_generic`)
-- Multi-block encoder has a known bug at levels >= 3 with non-trivial patterns
+- Cross-block match history (MatchState persists window + rep offsets + tables)
+- BT* strategies use DUBT-style binary tree match finder
+- BtOpt/BtUltra/BtUltra2 use price-based optimal parsing (forward price table + backward trace)
+- Raw slice-based _ext match functions avoid HashTable struct overhead
+- Step-based hash insertion for long matches (step=4 when ml>32)
+
+## Performance (100KB, vs C zstd)
+
+### Compression speed
+| Level | zenzstd | C zstd | Gap |
+|-------|---------|--------|-----|
+| L1 | 377 MiB/s | 3.93 GiB/s | 10x |
+| L3 | 295 MiB/s | 2.18 GiB/s | 7.4x |
+| L7 | 118 MiB/s | 446 MiB/s | 3.8x |
+| L11 | 43.3 MiB/s | 132 MiB/s | 3x |
+| L19 | 110 MiB/s | 1.6 MiB/s | **69x faster** |
+
+### Compression ratio (mixed data, zen/c where <1.0 = better than C)
+| Level | zen/c ratio |
+|-------|-------------|
+| L1 | 1.03 (3% worse) |
+| L3 | 0.96 (4% better) |
+| L7 | 0.77 (23% better) |
+| L11 | 0.65 (35% better) |
+
+### Decompression speed
+zenzstd 1.91 GiB/s vs C 5.64 GiB/s (3x gap)
 
 ## Known Bugs
 
-None currently. The match length code 52 bug (wrong baseline) has been fixed.
+None currently.
 
 ## Features
 
@@ -39,12 +62,14 @@ None currently. The match length code 52 bug (wrong baseline) has been fixed.
 - `hash` — enables xxhash64 checksums in frames
 - `dict_builder` — dictionary training (from ruzstd)
 - `fuzz_exports` — exposes FSE/Huffman internals
-- `simd` — optional archmage SIMD acceleration
+- `simd` — AVX2 acceleration via archmage/magetypes
 
-## Test Commands
+## Commands
 
 ```
-cargo test                      # all tests (199)
+cargo test                      # all tests (209)
 cargo test --features simd      # with SIMD
-cargo check --features simd     # verify SIMD compiles
+cargo bench --bench compress_compare              # benchmark
+cargo bench --bench compress_compare -- --save-baseline main
+cargo bench --bench compress_compare -- --baseline main --max-regression 5
 ```
