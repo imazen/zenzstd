@@ -47,6 +47,13 @@ fn count_match_scalar(_token: archmage::ScalarToken, a: &[u8], b: &[u8]) -> usiz
     count_match_u64(a, b)
 }
 
+/// NEON fallback — use the u64 path. NEON u8x16 comparison could be added later.
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[inline]
+fn count_match_neon(_token: archmage::NeonToken, a: &[u8], b: &[u8]) -> usize {
+    count_match_u64(a, b)
+}
+
 /// Core u64-based count_match. Used both as the non-SIMD path and as the
 /// tail handler for the SIMD paths (processes the final 0-31 bytes after
 /// the vector loop).

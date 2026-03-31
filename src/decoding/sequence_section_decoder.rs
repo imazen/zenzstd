@@ -11,6 +11,7 @@ use crate::fse::{FSEDecoder, SeqFSEDecoder};
 use alloc::vec::Vec;
 
 #[cfg(feature = "simd")]
+#[allow(unused_imports)]
 use archmage::prelude::*;
 
 /// Decode the provided source as a series of sequences into the supplied `target`.
@@ -689,6 +690,7 @@ pub fn decode_and_execute_sequences(
 #[cfg_attr(not(feature = "simd"), inline(always))]
 #[allow(clippy::needless_range_loop)]
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // autoversion generates the actual called variants
 fn fused_decode_execute_fast_inner(
     section: &SequencesHeader,
     br: &mut BitReaderReversed<'_>,

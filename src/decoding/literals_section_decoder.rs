@@ -9,6 +9,7 @@ use crate::huff0::HuffmanDecoder;
 use alloc::vec::Vec;
 
 #[cfg(feature = "simd")]
+#[allow(unused_imports)]
 use archmage::prelude::*;
 
 /// Decode and decompress the provided literals section into `target`, returning the number of bytes read.
@@ -145,6 +146,7 @@ fn decompress_literals(
 /// so the Huffman bit extraction benefits from BMI2 on AVX2 CPUs.
 #[cfg_attr(feature = "simd", archmage::autoversion)]
 #[cfg_attr(not(feature = "simd"), inline(always))]
+#[allow(dead_code)] // autoversion generates the actual called variants
 fn decode_huffman_stream(
     stream: &[u8],
     table: &crate::huff0::HuffmanTable,
