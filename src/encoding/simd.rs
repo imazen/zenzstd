@@ -28,11 +28,11 @@
 /// `simd` feature, falls back to 8-byte scalar chunking.
 #[inline(always)]
 pub fn count_match(a: &[u8], b: &[u8]) -> usize {
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         archmage::incant!(count_match(a, b))
     }
-    #[cfg(not(feature = "simd"))]
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
     {
         count_match_u64(a, b)
     }
