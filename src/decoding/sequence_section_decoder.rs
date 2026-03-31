@@ -651,7 +651,9 @@ pub fn decode_and_execute_sequences(
         // When `simd` feature is enabled, dispatch to the best available ISA variant
         // via incant!. This compiles the fused loop with target_feature=+avx2,+bmi2
         // on supporting CPUs, giving LLVM access to TZCNT, PDEP/PEXT, and wider copies.
-        #[cfg(feature = "simd")]
+        // Only use archmage dispatch on x86_64 where the V3 (AVX2+BMI2) variant
+        // is well-tested. NEON autoversion has a known decode correctness issue.
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             archmage::incant!(fused_decode_execute_fast_inner(
                 section,
@@ -662,7 +664,7 @@ pub fn decode_and_execute_sequences(
                 literals_buffer
             ))
         }
-        #[cfg(not(feature = "simd"))]
+        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
         {
             fused_decode_execute_fast_inner(
                 section,

@@ -8,7 +8,7 @@ use crate::decoding::errors::DecompressLiteralsError;
 use crate::huff0::HuffmanDecoder;
 use alloc::vec::Vec;
 
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[allow(unused_imports)]
 use archmage::prelude::*;
 
@@ -97,11 +97,11 @@ fn decompress_literals(
         let stream4 = &source[jump3..];
 
         for stream in &[stream1, stream2, stream3, stream4] {
-            #[cfg(feature = "simd")]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             {
                 archmage::incant!(decode_huffman_stream(stream, &scratch.table, target))?;
             }
-            #[cfg(not(feature = "simd"))]
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
             {
                 decode_huffman_stream(stream, &scratch.table, target)?;
             }
@@ -111,11 +111,11 @@ fn decompress_literals(
     } else {
         //just decode the one stream
         assert!(num_streams == 1);
-        #[cfg(feature = "simd")]
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             archmage::incant!(decode_huffman_stream(source, &scratch.table, target))?;
         }
-        #[cfg(not(feature = "simd"))]
+        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
         {
             decode_huffman_stream(source, &scratch.table, target)?;
         }
@@ -144,8 +144,8 @@ fn decompress_literals(
 ///
 /// When `simd` feature is enabled, `#[autoversion]` generates per-ISA variants
 /// so the Huffman bit extraction benefits from BMI2 on AVX2 CPUs.
-#[cfg_attr(feature = "simd", archmage::autoversion)]
-#[cfg_attr(not(feature = "simd"), inline(always))]
+#[cfg_attr(all(feature = "simd", target_arch = "x86_64"), archmage::autoversion)]
+#[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), inline(always))]
 #[allow(dead_code)] // autoversion generates the actual called variants
 fn decode_huffman_stream(
     stream: &[u8],
