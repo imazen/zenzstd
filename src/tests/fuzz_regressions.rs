@@ -9,7 +9,11 @@ fn test_all_artifacts() {
 
     let mut frame_dec = FrameDecoder::new();
 
-    for file in fs::read_dir("./fuzz/artifacts/decode").unwrap() {
+    let dir = match fs::read_dir("./fuzz/artifacts/decode") {
+        Ok(d) => d,
+        Err(_) => return, // Directory may not exist in CI
+    };
+    for file in dir {
         let file_name = file.unwrap().path();
 
         let fnstr = file_name.to_str().unwrap().to_owned();

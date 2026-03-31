@@ -89,6 +89,16 @@ fn bench_decode_c(compressed: &[u8], original_len: usize, iters: u32) -> f64 {
     start.elapsed().as_secs_f64() / iters as f64
 }
 
+fn bench_decode_ruzstd(compressed: &[u8], original_len: usize, iters: u32) -> f64 {
+    let start = Instant::now();
+    for _ in 0..iters {
+        let mut dec = ruzstd::decoding::FrameDecoder::new();
+        let mut target = vec![0u8; original_len + 4096];
+        dec.decode_all(compressed, &mut target).unwrap();
+    }
+    start.elapsed().as_secs_f64() / iters as f64
+}
+
 fn main() {
     let datasets: Vec<(&str, Vec<u8>)> = vec![
         ("text_100k", make_text(100_000)),
@@ -101,20 +111,14 @@ fn main() {
     let levels = [1, 3, 5, 7, 9, 11, 15, 19, 22];
 
     println!(
-        "{:<12} {:>3}  {:>7} {:>7} {:>6}  {:>8} {:>8} {:>6}  {:>8} {:>8} {:>6}",
-        "DATASET",
-        "LVL",
-        "ZEN_SZ",
-        "C_SZ",
-        "ZN/C",
-        "ENC_ZEN",
-        "ENC_C",
-        "E_GAP",
-        "DEC_ZEN",
-        "DEC_C",
-        "D_GAP",
+        "{:<12} {:>3}  {:>7} {:>7} {:>6}  {:>8} {:>8} {:>6}  {:>8} {:>8} {:>8} {:>6} {:>6}",
+        "DATASET", "LVL",
+        "ZEN_SZ", "C_SZ", "ZN/C",
+        "ENC_ZEN", "ENC_C", "E_GAP",
+        "DEC_ZEN", "DEC_RUZ", "DEC_C",
+        "vs_RUZ", "vs_C",
     );
-    println!("{}", "-".repeat(115));
+    println!("{}", "-".repeat(140));
 
     for (name, data) in &datasets {
         let enc_iters = if data.len() >= 1_000_000 { 3 } else { 10 };
@@ -125,8 +129,10 @@ fn main() {
             let (zen_compressed, zen_enc_time) = bench_encode_zen(data, level, enc_iters);
             let (c_compressed, c_enc_time) = bench_encode_c(data, level, enc_iters);
 
-            // Decode both (each decodes their own compressed output)
-            let zen_dec_time = bench_decode_zen(&zen_compressed, data.len(), dec_iters);
+            // Decode all three: zenzstd, ruzstd (upstream), C zstd
+            // All decode C-compressed data for fair comparison
+            let zen_dec_time = bench_decode_zen(&c_compressed, data.len(), dec_iters);
+            let ruz_dec_time = bench_decode_ruzstd(&c_compressed, data.len(), dec_iters);
             let c_dec_time = bench_decode_c(&c_compressed, data.len(), dec_iters);
 
             let zen_sz = zen_compressed.len();
@@ -138,22 +144,18 @@ fn main() {
             let enc_gap = enc_c / enc_zen;
 
             let dec_zen = mb_per_sec(data.len(), zen_dec_time);
+            let dec_ruz = mb_per_sec(data.len(), ruz_dec_time);
             let dec_c = mb_per_sec(data.len(), c_dec_time);
-            let dec_gap = dec_c / dec_zen;
+            let vs_ruz = dec_zen / dec_ruz; // >1 = we're faster than ruzstd
+            let vs_c = dec_c / dec_zen; // >1 = C is faster
 
             println!(
-                "{:<12} {:>3}  {:>7} {:>7} {:>5.2}x  {:>7.0}M {:>7.0}M {:>5.1}x  {:>7.0}M {:>7.0}M {:>5.1}x",
-                name,
-                level,
-                zen_sz,
-                c_sz,
-                size_ratio,
-                enc_zen,
-                enc_c,
-                enc_gap,
-                dec_zen,
-                dec_c,
-                dec_gap,
+                "{:<12} {:>3}  {:>7} {:>7} {:>5.2}x  {:>7.0}M {:>7.0}M {:>5.1}x  {:>7.0}M {:>7.0}M {:>7.0}M {:>5.1}x {:>5.1}x",
+                name, level,
+                zen_sz, c_sz, size_ratio,
+                enc_zen, enc_c, enc_gap,
+                dec_zen, dec_ruz, dec_c,
+                vs_ruz, vs_c,
             );
         }
         println!();

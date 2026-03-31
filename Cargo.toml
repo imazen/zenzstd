@@ -2,7 +2,7 @@
 name = "zenzstd"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT"
 description = "Pure Rust Zstandard (zstd) compression and decompression — forbid(unsafe_code), no_std+alloc"
 repository = "https://github.com/imazen/zenzstd"
@@ -23,7 +23,7 @@ exclude = [
 ]
 
 [features]
-default = ["hash", "std"]
+default = ["hash", "std", "simd"]
 std = []
 hash = []
 dict_builder = ["std", "dep:fastrand"]
@@ -51,6 +51,7 @@ magetypes = { version = "0.9.15", optional = true }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 rand = { version = "0.9.0", features = ["small_rng"] }
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
+ruzstd = "0.8.2"
 zenbench = "0.1.2"
 
 [[bench]]
