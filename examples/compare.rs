@@ -112,11 +112,19 @@ fn main() {
 
     println!(
         "{:<12} {:>3}  {:>7} {:>7} {:>6}  {:>8} {:>8} {:>6}  {:>8} {:>8} {:>8} {:>6} {:>6}",
-        "DATASET", "LVL",
-        "ZEN_SZ", "C_SZ", "ZN/C",
-        "ENC_ZEN", "ENC_C", "E_GAP",
-        "DEC_ZEN", "DEC_RUZ", "DEC_C",
-        "vs_RUZ", "vs_C",
+        "DATASET",
+        "LVL",
+        "ZEN_SZ",
+        "C_SZ",
+        "ZN/C",
+        "ENC_ZEN",
+        "ENC_C",
+        "E_GAP",
+        "DEC_ZEN",
+        "DEC_RUZ",
+        "DEC_C",
+        "vs_RUZ",
+        "vs_C",
     );
     println!("{}", "-".repeat(140));
 
@@ -151,11 +159,19 @@ fn main() {
 
             println!(
                 "{:<12} {:>3}  {:>7} {:>7} {:>5.2}x  {:>7.0}M {:>7.0}M {:>5.1}x  {:>7.0}M {:>7.0}M {:>7.0}M {:>5.1}x {:>5.1}x",
-                name, level,
-                zen_sz, c_sz, size_ratio,
-                enc_zen, enc_c, enc_gap,
-                dec_zen, dec_ruz, dec_c,
-                vs_ruz, vs_c,
+                name,
+                level,
+                zen_sz,
+                c_sz,
+                size_ratio,
+                enc_zen,
+                enc_c,
+                enc_gap,
+                dec_zen,
+                dec_ruz,
+                dec_c,
+                vs_ruz,
+                vs_c,
             );
         }
         println!();
