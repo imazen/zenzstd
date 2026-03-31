@@ -1,0 +1,8 @@
+# Corpus files are binary — must not have CRLF conversion on Windows
+decodecorpus_files/* binary
+dict_tests/* binary
+test_fixtures/* binary
+fuzz/artifacts/* binary
+
+# Compressed files
+*.zst binary
