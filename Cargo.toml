@@ -49,7 +49,7 @@ magetypes = { version = "0.9.15", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-rand = { version = "0.9.0", features = ["small_rng"] }
+rand = "0.10.0"
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
 ruzstd = "0.8.2"
 zenbench = "0.1.2"
