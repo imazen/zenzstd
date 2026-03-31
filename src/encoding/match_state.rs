@@ -97,17 +97,13 @@ impl RepCodes {
                 self.rep[1] = self.rep[0];
                 self.rep[0] = tmp;
             } else {
-                let tmp = self.rep[1];
-                self.rep[1] = self.rep[0];
-                self.rep[0] = tmp;
+                self.rep.swap(0, 1);
             }
         }
         // off_base == 1: rep[0] stays as is (or rep[1] when ll==0)
         else if lit_len == 0 {
             // off_base 1 with ll==0 means rep[1]
-            let tmp = self.rep[1];
-            self.rep[1] = self.rep[0];
-            self.rep[0] = tmp;
+            self.rep.swap(0, 1);
         }
     }
 
@@ -227,7 +223,7 @@ pub fn try_repcodes(
                 off_base: RepCodes::off_base_for_rep(rep_idx),
                 match_len: ml as u32,
             };
-            if best.map_or(true, |b| candidate.match_len > b.match_len) {
+            if best.is_none_or(|b| candidate.match_len > b.match_len) {
                 best = Some(candidate);
             }
         }
@@ -497,7 +493,7 @@ pub fn search_hash_chain_ext(
                 off_base: dist as u32 + 3,
                 match_len: ml as u32,
             };
-            if best.map_or(true, |b| {
+            if best.is_none_or(|b| {
                 cand.match_len > b.match_len
                     || (cand.match_len == b.match_len && cand.gain() > b.gain())
             }) {

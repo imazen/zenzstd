@@ -38,6 +38,10 @@ unsafe-compress = []
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("avx512", "unsafe-decompress", "unsafe-compress"))'] }
 
+[lints.clippy]
+too_many_arguments = "allow"
+collapsible_if = "allow"
+
 [dependencies]
 fastrand = { version = "2.3.0", optional = true }
 archmage = { version = "0.9.15", optional = true }

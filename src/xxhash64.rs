@@ -10,6 +10,7 @@ const PRIME64_4: u64 = 0x85EB_CA77_C2B2_AE63;
 const PRIME64_5: u64 = 0x27D4_EB2F_1656_67C5;
 
 /// Compute XXH64 hash of the given data with the specified seed.
+#[allow(dead_code)]
 pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
     let len = data.len() as u64;
     let mut h64: u64;
@@ -133,6 +134,7 @@ fn read_u32_le(data: &[u8]) -> u32 {
 }
 
 /// Streaming XXH64 hasher, compatible with `std::hash::Hasher` semantics.
+#[allow(dead_code)]
 pub struct XxHash64 {
     seed: u64,
     v1: u64,
@@ -144,6 +146,7 @@ pub struct XxHash64 {
     buf_len: usize,
 }
 
+#[allow(dead_code)]
 impl XxHash64 {
     /// Create a new hasher with the given seed.
     pub fn with_seed(seed: u64) -> Self {
@@ -226,6 +229,7 @@ impl XxHash64 {
     }
 
     /// Reset the hasher state.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         *self = Self::with_seed(self.seed);
     }

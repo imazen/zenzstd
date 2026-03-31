@@ -96,6 +96,7 @@ impl FrameDecoderState {
     pub fn new(source: impl Read) -> Result<FrameDecoderState, FrameDecoderError> {
         let (frame, header_size) = frame::read_frame_header(source)?;
         let window_size = frame.window_size()?;
+        #[allow(unused_mut)]
         let mut decoder_scratch = DecoderScratch::new(window_size as usize);
         #[cfg(feature = "hash")]
         {

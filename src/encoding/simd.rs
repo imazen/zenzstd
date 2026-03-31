@@ -154,6 +154,7 @@ fn count_match_v3(token: archmage::X64V3Token, a: &[u8], b: &[u8]) -> usize {
 /// across 4 tables and merging at the end, we allow 4 consecutive identical bytes
 /// before hitting a dependency, which covers the vast majority of real data.
 #[inline]
+#[allow(dead_code)]
 pub fn histogram(data: &[u8], counts: &mut [u32; 256]) {
     *counts = [0u32; 256];
 

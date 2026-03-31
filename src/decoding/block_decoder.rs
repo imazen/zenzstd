@@ -185,8 +185,11 @@ impl BlockDecoder {
         cursor += upper_limit_for_literals;
 
         // Parse sequence section header
-        let seq_header_remaining = header.content_size as usize - cursor;
-        vprintln!("Slice for sequences with headers: {}", seq_header_remaining);
+        let _seq_header_remaining = header.content_size as usize - cursor;
+        vprintln!(
+            "Slice for sequences with headers: {}",
+            _seq_header_remaining
+        );
 
         let mut seq_section = SequencesHeader::new();
         let bytes_in_sequence_header =

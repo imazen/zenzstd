@@ -1150,19 +1150,17 @@ fn do_offset_history_hoisted(
     // This helps the branch predictor by reducing the number of
     // unpredictable branches from 4-6 to 1 (the lit_len check).
     let offsets = [*off1, *off2, *off3];
-    let actual_offset;
-
-    if lit_len > 0 {
+    let actual_offset = if lit_len > 0 {
         // With literals: offset_value 1/2/3 maps to off1/off2/off3
-        actual_offset = offsets[(offset_value - 1) as usize];
+        offsets[(offset_value - 1) as usize]
     } else {
         // Without literals: shifted — 1→off2, 2→off3, 3→off1-1
-        actual_offset = if offset_value == 3 {
+        if offset_value == 3 {
             off1.wrapping_sub(1)
         } else {
             offsets[offset_value as usize] // 1→offsets[1]=off2, 2→offsets[2]=off3
-        };
-    }
+        }
+    };
 
     // Rotate: push actual_offset to front
     if offset_value == 1 && lit_len > 0 {

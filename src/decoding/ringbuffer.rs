@@ -17,6 +17,7 @@ pub struct RingBuffer {
     tail: usize,
 }
 
+#[allow(dead_code)]
 impl RingBuffer {
     pub fn new() -> Self {
         RingBuffer {

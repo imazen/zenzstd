@@ -498,7 +498,7 @@ pub fn compress_dfast_ext(
                     off_base: (pos - short_prev) as u32 + 3,
                     match_len: ml as u32,
                 };
-                if best.map_or(true, |b| cand.match_len > b.match_len) {
+                if best.is_none_or(|b| cand.match_len > b.match_len) {
                     best = Some(cand);
                 }
             }
@@ -628,7 +628,7 @@ pub fn compress_dfast_dict_ext(
                     off_base: (pos - sp) as u32 + 3,
                     match_len: ml as u32,
                 };
-                if best.map_or(true, |b| c.match_len > b.match_len) {
+                if best.is_none_or(|b| c.match_len > b.match_len) {
                     best = Some(c);
                 }
             }

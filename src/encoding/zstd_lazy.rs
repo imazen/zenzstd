@@ -53,7 +53,7 @@ pub fn compress_greedy_ext(
     let mut pos: usize = 0;
     let end = src.len().saturating_sub(8);
     let mut next_to_update: usize = 0;
-    let mut lazy_skipping = false;
+    let lazy_skipping = false;
 
     while pos < end {
         let lit_len = (pos - anchor) as u32;
@@ -662,11 +662,7 @@ impl BinaryTree {
         let match_index = self.hash_table[h] as usize;
         self.hash_table[h] = pos as u32;
 
-        let bt_low = if self.bt_mask as usize >= pos {
-            0
-        } else {
-            pos - self.bt_mask as usize
-        };
+        let bt_low = pos.saturating_sub(self.bt_mask as usize);
 
         let (smaller_idx, larger_idx) = self.children_idx(pos as u32);
         let mut smaller_slot = smaller_idx;
@@ -705,7 +701,7 @@ impl BinaryTree {
                     off_base: dist as u32 + 3,
                     match_len: match_len as u32,
                 };
-                if best.map_or(true, |b| {
+                if best.is_none_or(|b| {
                     cand.match_len > b.match_len
                         || (cand.match_len == b.match_len && cand.gain() > b.gain())
                 }) {
@@ -779,11 +775,7 @@ impl BinaryTree {
         let match_index = self.hash_table[h] as usize;
         self.hash_table[h] = pos as u32;
 
-        let bt_low = if self.bt_mask as usize >= pos {
-            0
-        } else {
-            pos - self.bt_mask as usize
-        };
+        let bt_low = pos.saturating_sub(self.bt_mask as usize);
 
         let (smaller_idx, larger_idx) = self.children_idx(pos as u32);
         let mut smaller_slot = smaller_idx;
@@ -881,11 +873,7 @@ impl BinaryTree {
         let match_index = self.hash_table[h] as usize;
         self.hash_table[h] = pos as u32;
 
-        let bt_low = if self.bt_mask as usize >= pos {
-            0
-        } else {
-            pos - self.bt_mask as usize
-        };
+        let bt_low = pos.saturating_sub(self.bt_mask as usize);
 
         let (smaller_idx, larger_idx) = self.children_idx(pos as u32);
         let mut smaller_slot = smaller_idx;
@@ -961,11 +949,7 @@ fn search_binary_tree(
     let min_match = params.min_match.max(4) as usize;
     let search_depth = params.search_depth();
     let window_size = params.window_size();
-    let window_low = if pos > window_size {
-        pos - window_size
-    } else {
-        0
-    };
+    let window_low = pos.saturating_sub(window_size);
 
     // CRITICAL: If we're in a skipped area (pos < next_to_update), return nothing.
     // This matches C zstd line 402: "if (ip < ms->window.base + ms->nextToUpdate) return 0;"
@@ -981,7 +965,7 @@ fn search_binary_tree(
 
     // Search the binary tree
     if let Some(bt_match) = bt.insert_and_find(src, pos, min_match, search_depth, window_low) {
-        if best.map_or(true, |b| {
+        if best.is_none_or(|b| {
             bt_match.match_len > b.match_len
                 || (bt_match.match_len == b.match_len && bt_match.gain() > b.gain())
         }) {
@@ -998,11 +982,7 @@ fn insert_binary_tree(src: &[u8], pos: usize, bt: &mut BinaryTree, params: &Comp
     let min_match = params.min_match.max(4) as usize;
     let search_depth = params.search_depth();
     let window_size = params.window_size();
-    let window_low = if pos > window_size {
-        pos - window_size
-    } else {
-        0
-    };
+    let window_low = pos.saturating_sub(window_size);
     bt.insert_only(src, pos, min_match, search_depth, window_low);
 }
 

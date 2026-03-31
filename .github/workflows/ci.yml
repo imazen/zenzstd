@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --no-default-features
+      - run: cargo test --no-default-features --lib
 
   test-all-features:
     name: Test (hash + dict_builder)

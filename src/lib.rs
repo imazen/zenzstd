@@ -67,6 +67,13 @@ pub(crate) mod huff0;
 
 pub(crate) mod xxhash64;
 
+/// Streaming compression/decompression API matching the `zstd` crate.
+///
+/// Provides `encode_all`, `decode_all`, `copy_encode`, `copy_decode`,
+/// plus `Encoder` and `Decoder` type aliases.
+#[cfg(feature = "std")]
+pub mod stream;
+
 #[cfg(feature = "std")]
 pub mod io_std;
 

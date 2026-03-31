@@ -33,8 +33,8 @@ pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequ
     #[cfg(debug_assertions)]
     let mut seq_sum: u32 = 0;
 
-    for idx in 0..sequences.len() {
-        let seq = sequences[idx];
+    for seq in sequences {
+        let seq = *seq;
 
         if seq.ll > 0 {
             let high = literals_copy_counter + seq.ll as usize;
