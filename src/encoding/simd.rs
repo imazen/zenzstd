@@ -28,11 +28,11 @@
 /// `simd` feature, falls back to 8-byte scalar chunking.
 #[inline(always)]
 pub fn count_match(a: &[u8], b: &[u8]) -> usize {
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(feature = "simd")]
     {
-        archmage::incant!(count_match(a, b))
+        archmage::incant!(count_match(a, b), [v3, neon, wasm128, scalar])
     }
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(feature = "simd"))]
     {
         count_match_u64(a, b)
     }
@@ -51,6 +51,13 @@ fn count_match_scalar(_token: archmage::ScalarToken, a: &[u8], b: &[u8]) -> usiz
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 #[inline]
 fn count_match_neon(_token: archmage::NeonToken, a: &[u8], b: &[u8]) -> usize {
+    count_match_u64(a, b)
+}
+
+/// WASM128 fallback — use the u64 path.
+#[cfg(all(feature = "simd", target_arch = "wasm32"))]
+#[inline]
+fn count_match_wasm128(_token: archmage::Wasm128Token, a: &[u8], b: &[u8]) -> usize {
     count_match_u64(a, b)
 }
 
