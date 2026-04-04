@@ -47,16 +47,16 @@ fn count_match_scalar(_token: archmage::ScalarToken, a: &[u8], b: &[u8]) -> usiz
     count_match_u64(a, b)
 }
 
-/// NEON count_match — `#[arcane]` enables auto-vectorization of the u64 loop under target_feature.
+/// NEON fallback — use the u64 path. NEON u8x16 comparison could be added later.
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[archmage::arcane]
+#[inline]
 fn count_match_neon(_token: archmage::NeonToken, a: &[u8], b: &[u8]) -> usize {
     count_match_u64(a, b)
 }
 
-/// WASM128 count_match — `#[arcane]` enables auto-vectorization of the u64 loop under target_feature.
+/// WASM128 fallback — use the u64 path.
 #[cfg(all(feature = "simd", target_arch = "wasm32"))]
-#[archmage::arcane]
+#[inline]
 fn count_match_wasm128(_token: archmage::Wasm128Token, a: &[u8], b: &[u8]) -> usize {
     count_match_u64(a, b)
 }
@@ -64,7 +64,7 @@ fn count_match_wasm128(_token: archmage::Wasm128Token, a: &[u8], b: &[u8]) -> us
 /// Core u64-based count_match. Used both as the non-SIMD path and as the
 /// tail handler for the SIMD paths (processes the final 0-31 bytes after
 /// the vector loop).
-#[inline(always)]
+#[inline]
 fn count_match_u64(a: &[u8], b: &[u8]) -> usize {
     let len = a.len().min(b.len());
     let mut offset = 0;
