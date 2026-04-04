@@ -47,18 +47,56 @@ fn count_match_scalar(_token: archmage::ScalarToken, a: &[u8], b: &[u8]) -> usiz
     count_match_u64(a, b)
 }
 
-/// NEON fallback — use the u64 path. NEON u8x16 comparison could be added later.
-#[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[inline]
-fn count_match_neon(_token: archmage::NeonToken, a: &[u8], b: &[u8]) -> usize {
-    count_match_u64(a, b)
+/// Generic u8x16 count_match: 16-byte vector XOR + bitmask to find first differing byte.
+///
+/// Works on all platforms with u8x16 support (NEON, WASM128, SSE2). Processes
+/// 16 bytes per iteration, falling back to the u64 loop for the 0-15 byte tail.
+/// Must be `#[inline(always)]` so it inlines into callers, inheriting their
+/// target_feature context.
+#[cfg(all(feature = "simd", any(target_arch = "aarch64", target_arch = "wasm32")))]
+#[inline(always)]
+fn count_match_generic<T: magetypes::simd::backends::U8x16Backend>(
+    token: T,
+    a: &[u8],
+    b: &[u8],
+) -> usize {
+    use magetypes::simd::generic::u8x16;
+
+    let len = a.len().min(b.len());
+    let mut offset = 0;
+
+    while offset + 16 <= len {
+        let chunk_a: &[u8; 16] = a[offset..offset + 16].try_into().unwrap();
+        let chunk_b: &[u8; 16] = b[offset..offset + 16].try_into().unwrap();
+        let va = u8x16::load(token, chunk_a);
+        let vb = u8x16::load(token, chunk_b);
+        let diff = va ^ vb;
+        let zero = u8x16::zero(token);
+        let eq_mask = diff.simd_eq(zero);
+        let mask = eq_mask.bitmask();
+        if mask != 0xFFFF {
+            let first_diff = (!mask).trailing_zeros() as usize;
+            return offset + first_diff;
+        }
+        offset += 16;
+    }
+
+    // Tail: u64 path then byte-by-byte
+    offset + count_match_u64(&a[offset..], &b[offset..])
 }
 
-/// WASM128 fallback — use the u64 path.
+/// NEON count_match: real u8x16 SIMD via generic implementation.
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[inline]
+fn count_match_neon(token: archmage::NeonToken, a: &[u8], b: &[u8]) -> usize {
+    count_match_generic(token, a, b)
+}
+
+/// WASM128 count_match: real u8x16 SIMD via generic implementation.
 #[cfg(all(feature = "simd", target_arch = "wasm32"))]
 #[inline]
-fn count_match_wasm128(_token: archmage::Wasm128Token, a: &[u8], b: &[u8]) -> usize {
-    count_match_u64(a, b)
+fn count_match_wasm128(token: archmage::Wasm128Token, a: &[u8], b: &[u8]) -> usize {
+    count_match_generic(token, a, b)
 }
 
 /// Core u64-based count_match. Used both as the non-SIMD path and as the
