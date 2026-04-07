@@ -711,6 +711,7 @@ pub enum ExecuteSequencesError {
     DecodebufferError(DecodeBufferError),
     NotEnoughBytesForSequence { wanted: usize, have: usize },
     ZeroOffset,
+    BlockContentTooLarge,
 }
 
 impl core::fmt::Display for ExecuteSequencesError {
@@ -727,6 +728,13 @@ impl core::fmt::Display for ExecuteSequencesError {
             }
             ExecuteSequencesError::ZeroOffset => {
                 write!(f, "Illegal offset: 0 found")
+            }
+            ExecuteSequencesError::BlockContentTooLarge => {
+                write!(
+                    f,
+                    "Block content exceeds maximum block size ({})",
+                    crate::common::MAX_BLOCK_SIZE
+                )
             }
         }
     }

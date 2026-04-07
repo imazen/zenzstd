@@ -724,6 +724,7 @@ fn fused_decode_execute_fast_inner(
     let drain_pos = buffer.buffer.drain_pos;
     let mut pos = buffer.buffer.pos;
     let mut total_out = buffer.total_output_counter;
+    let buf_capacity = buffer.buffer.buf.len();
 
     // Hoist offset history to scalar locals — avoids array indexing overhead
     let mut off1 = offset_hist[0];
@@ -819,6 +820,14 @@ fn fused_decode_execute_fast_inner(
                 }
                 .into());
             }
+            if pos + ll > buf_capacity {
+                buffer.buffer.pos = pos;
+                buffer.total_output_counter = total_out;
+                offset_hist[0] = off1;
+                offset_hist[1] = off2;
+                offset_hist[2] = off3;
+                return Err(ExecuteSequencesError::BlockContentTooLarge.into());
+            }
             use super::unsafe_ops;
             unsafe_ops::copy_to_buf(
                 &mut buffer.buffer.buf,
@@ -844,6 +853,14 @@ fn fused_decode_execute_fast_inner(
 
         // Copy match — use unsafe_ops for hot path when feature enabled
         if ml > 0 {
+            if pos + ml > buf_capacity {
+                buffer.buffer.pos = pos;
+                buffer.total_output_counter = total_out;
+                offset_hist[0] = off1;
+                offset_hist[1] = off2;
+                offset_hist[2] = off3;
+                return Err(ExecuteSequencesError::BlockContentTooLarge.into());
+            }
             use super::unsafe_ops;
             let buf_len = pos - drain_pos;
             let actual_off = actual_offset as usize;
@@ -894,6 +911,14 @@ fn fused_decode_execute_fast_inner(
     // Trailing literals — direct buf write
     if literals_copy_counter < literals_len {
         let remaining = literals_len - literals_copy_counter;
+        if pos + remaining > buf_capacity {
+            buffer.buffer.pos = pos;
+            buffer.total_output_counter = total_out;
+            offset_hist[0] = off1;
+            offset_hist[1] = off2;
+            offset_hist[2] = off3;
+            return Err(ExecuteSequencesError::BlockContentTooLarge.into());
+        }
         buffer.buffer.buf[pos..pos + remaining]
             .copy_from_slice(&literals_buffer[literals_copy_counter..]);
         pos += remaining;
