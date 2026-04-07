@@ -1,0 +1,29 @@
+# Zstandard magic bytes
+# Frame magic
+"\x28\xB5\x2F\xFD"
+# Skippable frame magic
+"\x5D\x2A\x4D\x18"
+# Common frame header bytes
+"\x04\x00\x00\x00"
+"\x00\x00\x00\x00"
+# Window descriptor common values
+"\x00"
+"\x01"
+"\x10"
+"\x20"
+"\x40"
+"\x80"
+# Block header types (raw, rle, compressed, reserved)
+"\x00\x00\x00"
+"\x02\x00\x00"
+"\x04\x00\x00"
+"\x06\x00\x00"
+# Last block flag
+"\x01\x00\x00"
+"\x03\x00\x00"
+"\x05\x00\x00"
+"\x07\x00\x00"
+# Checksum placeholder
+"\x00\x00\x00\x00"
+# Dictionary ID magic
+"\x37\xA4\x30\xEC"
