@@ -867,12 +867,14 @@ fn fused_decode_execute_fast_inner(
 
             if actual_off > buf_len {
                 // Cold path: match references dictionary content.
+                // Use repeat() (with reserve) since dictionary bytes are appended
+                // to the buffer, consuming pre-reserved space.
                 buffer.buffer.pos = pos;
                 buffer.total_output_counter = total_out;
                 offset_hist[0] = off1;
                 offset_hist[1] = off2;
                 offset_hist[2] = off3;
-                buffer.repeat_no_reserve(actual_off, ml)?;
+                buffer.repeat(actual_off, ml)?;
                 pos = buffer.buffer.pos;
                 total_out = buffer.total_output_counter;
             } else {
@@ -977,6 +979,7 @@ fn fused_decode_execute_rle_inner(
     let of_rle = fse.of_rle;
 
     buffer.reserve(crate::common::MAX_BLOCK_SIZE as usize);
+    let buf_capacity = buffer.buffer.buf.len();
 
     for seq_idx in 0..num_sequences {
         let (ll_code, ll_nbits) = match ll_rle {
@@ -1072,6 +1075,9 @@ fn fused_decode_execute_rle_inner(
                 }
                 .into());
             }
+            if buffer.buffer.pos + ll > buf_capacity {
+                return Err(ExecuteSequencesError::BlockContentTooLarge.into());
+            }
             let literals = &literals_buffer[literals_copy_counter..high];
             buffer.push_no_reserve(literals);
             literals_copy_counter += ll;
@@ -1083,12 +1089,18 @@ fn fused_decode_execute_rle_inner(
         }
 
         if ml > 0 {
-            buffer.repeat_no_reserve(actual_offset as usize, ml)?;
+            if buffer.buffer.pos + ml > buf_capacity {
+                return Err(ExecuteSequencesError::BlockContentTooLarge.into());
+            }
+            buffer.repeat(actual_offset as usize, ml)?;
         }
     }
 
     if literals_copy_counter < literals_len {
         let rest_literals = &literals_buffer[literals_copy_counter..];
+        if buffer.buffer.pos + rest_literals.len() > buf_capacity {
+            return Err(ExecuteSequencesError::BlockContentTooLarge.into());
+        }
         buffer.push_no_reserve(rest_literals);
     }
 

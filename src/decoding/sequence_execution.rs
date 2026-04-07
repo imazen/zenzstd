@@ -57,7 +57,7 @@ pub fn execute_sequences(scratch: &mut DecoderScratch) -> Result<(), ExecuteSequ
         if seq.ml > 0 {
             scratch
                 .buffer
-                .repeat_no_reserve(actual_offset as usize, seq.ml as usize)?;
+                .repeat(actual_offset as usize, seq.ml as usize)?;
         }
 
         #[cfg(debug_assertions)]
