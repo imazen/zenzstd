@@ -8,3 +8,4 @@ Thumbs.db
 perf.data
 perf.data.old
 flamegraph.svg
+!fuzz/Cargo.lock
