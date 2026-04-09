@@ -8,4 +8,21 @@ Thumbs.db
 perf.data
 perf.data.old
 flamegraph.svg
+
+# Fuzz build artifacts and crashes
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/coverage/
+fuzz-*.log
+*.profraw
+*.profdata
 !fuzz/Cargo.lock
+
+# Tooling noise
+.superwork/
+copter-report/
+.zenbench/
+.external-cache/
+Cargo.toml.original.txt
+*.rs.local

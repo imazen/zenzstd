@@ -20,6 +20,15 @@ exclude = [
     "perf.data.old",
     "flamegraph.svg",
     "CLAUDE.md",
+    "CONTEXT-HANDOFF.md",
+    "FEEDBACK.md",
+    ".claude/",
+    ".superwork/",
+    ".zenbench/",
+    "copter-report/",
+    "Cross.toml",
+    "justfile",
+    "Cargo.toml.original.txt",
 ]
 
 [features]
@@ -52,7 +61,7 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 rand = "0.10.0"
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
 ruzstd = "0.8.2"
-zenbench = "0.1.2"
+zenbench = { version = "0.1.2"}
 
 [[bench]]
 name = "decode_all"
