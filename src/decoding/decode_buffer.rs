@@ -88,6 +88,7 @@ impl DecodeBuffer {
     }
 
     /// Match copy without checking capacity. Caller must ensure space was pre-reserved.
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn repeat_no_reserve(
         &mut self,

@@ -493,7 +493,7 @@ mod tests {
         // The split should be somewhere around the 64KB boundary
         let split = boundaries[1];
         assert!(
-            split >= 32 * 1024 && split <= 96 * 1024,
+            (32 * 1024..=96 * 1024).contains(&split),
             "split at {} is not near the 64KB transition",
             split
         );

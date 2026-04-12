@@ -588,5 +588,5 @@ pub mod level_roundtrip;
 #[test]
 fn verbose_disabled() {
     use crate::VERBOSE;
-    assert_eq!(VERBOSE, false);
+    const { assert!(!VERBOSE) };
 }

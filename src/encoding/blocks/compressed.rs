@@ -912,21 +912,11 @@ mod tests {
         // First, build a custom distribution
         let codes: Vec<u8> = {
             let mut v = Vec::new();
-            for _ in 0..200 {
-                v.push(0);
-            }
-            for _ in 0..100 {
-                v.push(1);
-            }
-            for _ in 0..50 {
-                v.push(2);
-            }
-            for _ in 0..25 {
-                v.push(3);
-            }
-            for _ in 0..10 {
-                v.push(4);
-            }
+            v.extend(core::iter::repeat_n(0u8, 200));
+            v.extend(core::iter::repeat_n(1u8, 100));
+            v.extend(core::iter::repeat_n(2u8, 50));
+            v.extend(core::iter::repeat_n(3u8, 25));
+            v.extend(core::iter::repeat_n(4u8, 10));
             v
         };
 
@@ -967,15 +957,9 @@ mod tests {
         // heavily concentrated on high offset codes, which don't match the default
         let codes: Vec<u8> = {
             let mut v = Vec::new();
-            for _ in 0..300 {
-                v.push(20);
-            }
-            for _ in 0..200 {
-                v.push(21);
-            }
-            for _ in 0..100 {
-                v.push(22);
-            }
+            v.extend(core::iter::repeat_n(20u8, 300));
+            v.extend(core::iter::repeat_n(21u8, 200));
+            v.extend(core::iter::repeat_n(22u8, 100));
             v
         };
 

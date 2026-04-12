@@ -162,6 +162,7 @@ impl FlatBuffer {
     }
 
     /// Copy from within without capacity check. Caller must ensure space.
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn extend_from_within_no_reserve(&mut self, start: usize, len: usize) {
         debug_assert!(
@@ -455,11 +456,11 @@ mod tests {
 
         // Verify data integrity
         let result = collect(&fb);
-        for i in 0..100 {
-            assert_eq!(result[i], (i + 100) as u8, "mismatch at {i}");
+        for (i, &val) in result.iter().enumerate().take(100) {
+            assert_eq!(val, (i + 100) as u8, "mismatch at {i}");
         }
-        for i in 0..50 {
-            assert_eq!(result[100 + i], (200 + i) as u8, "mismatch at {}", 100 + i);
+        for (i, &val) in result[100..].iter().enumerate().take(50) {
+            assert_eq!(val, (200 + i) as u8, "mismatch at {}", 100 + i);
         }
     }
 
@@ -486,8 +487,8 @@ mod tests {
 
         // Verify data integrity
         let result = collect(&fb);
-        for i in 0..20 {
-            assert_eq!(result[i], (i + 80) as u8);
+        for (i, &val) in result.iter().enumerate().take(20) {
+            assert_eq!(val, (i + 80) as u8);
         }
     }
 

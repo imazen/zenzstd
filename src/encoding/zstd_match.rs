@@ -670,12 +670,12 @@ mod tests {
             let mut decoded = Vec::with_capacity(src.len());
             decoder
                 .decode_all_to_vec(&compressed, &mut decoded)
-                .expect(&alloc::format!("our decoder failed at level {level}"));
+                .unwrap_or_else(|e| panic!("our decoder failed at level {level}: {e}"));
             assert_eq!(decoded, src, "our decoder: mismatch at level {level}");
 
             let mut decoded_c = Vec::new();
             zstd::stream::copy_decode(compressed.as_slice(), &mut decoded_c)
-                .expect(&alloc::format!("C zstd failed at level {level}"));
+                .unwrap_or_else(|e| panic!("C zstd failed at level {level}: {e}"));
             assert_eq!(decoded_c, src, "C zstd: mismatch at level {level}");
         }
     }
@@ -695,7 +695,7 @@ mod tests {
 
             let mut decoded = Vec::new();
             zstd::stream::copy_decode(compressed.as_slice(), &mut decoded)
-                .expect(&alloc::format!("C zstd failed at level {level}"));
+                .unwrap_or_else(|e| panic!("C zstd failed at level {level}: {e}"));
             assert_eq!(decoded, src, "C zstd: small data mismatch at level {level}");
         }
     }
