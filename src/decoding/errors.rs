@@ -439,6 +439,13 @@ impl core::fmt::Display for DecodeBufferError {
 #[non_exhaustive]
 pub enum DictionaryDecodeError {
     BadMagicNum { got: [u8; 4] },
+    /// Dictionary header is shorter than the minimum 8 bytes (4-byte magic + 4-byte dict_id).
+    /// Returned by [`crate::decoding::dictionary::Dictionary::decode_dict`] before any indexing
+    /// to prevent panics on truncated input.
+    DictionaryTooShort { got: usize, need: usize },
+    /// Dictionary contains a header section but is missing the trailing 12-byte
+    /// rep-offset history block that must follow the entropy tables.
+    MissingOffsetHistory { got: usize },
     FSETableError(FSETableError),
     HuffmanTableError(HuffmanTableError),
 }
@@ -463,6 +470,18 @@ impl core::fmt::Display for DictionaryDecodeError {
                     "Bad magic_num at start of the dictionary; Got: {:#04X?}, Expected: {:#04x?}",
                     got,
                     crate::decoding::dictionary::MAGIC_NUM,
+                )
+            }
+            DictionaryDecodeError::DictionaryTooShort { got, need } => {
+                write!(
+                    f,
+                    "Dictionary input is too short: have {got} bytes, need at least {need} for the header"
+                )
+            }
+            DictionaryDecodeError::MissingOffsetHistory { got } => {
+                write!(
+                    f,
+                    "Dictionary tables consumed all input; need 12 more bytes for rep-offset history (got {got} remaining)"
                 )
             }
             DictionaryDecodeError::FSETableError(e) => write!(f, "{e:?}"),
