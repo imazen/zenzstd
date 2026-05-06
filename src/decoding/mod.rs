@@ -5,7 +5,7 @@ mod frame_decoder;
 mod streaming_decoder;
 
 pub use frame_decoder::{BlockDecodingStrategy, FrameDecoder};
-pub use streaming_decoder::StreamingDecoder;
+pub use streaming_decoder::{DEFAULT_DECODE_OUTPUT_CAP, StreamingDecoder};
 
 pub(crate) mod block_decoder;
 pub(crate) mod decode_buffer;

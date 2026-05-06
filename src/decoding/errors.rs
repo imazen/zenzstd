@@ -438,14 +438,21 @@ impl core::fmt::Display for DecodeBufferError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DictionaryDecodeError {
-    BadMagicNum { got: [u8; 4] },
+    BadMagicNum {
+        got: [u8; 4],
+    },
     /// Dictionary header is shorter than the minimum 8 bytes (4-byte magic + 4-byte dict_id).
     /// Returned by [`crate::decoding::dictionary::Dictionary::decode_dict`] before any indexing
     /// to prevent panics on truncated input.
-    DictionaryTooShort { got: usize, need: usize },
+    DictionaryTooShort {
+        got: usize,
+        need: usize,
+    },
     /// Dictionary contains a header section but is missing the trailing 12-byte
     /// rep-offset history block that must follow the entropy tables.
-    MissingOffsetHistory { got: usize },
+    MissingOffsetHistory {
+        got: usize,
+    },
     FSETableError(FSETableError),
     HuffmanTableError(HuffmanTableError),
 }

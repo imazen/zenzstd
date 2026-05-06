@@ -278,7 +278,10 @@ fn truncated_dictionary_returns_error_does_not_panic() {
         let raw: alloc::vec::Vec<u8> = (0..n as u8).collect();
         match Dictionary::decode_dict(&raw) {
             Err(DictionaryDecodeError::DictionaryTooShort { got, need: 8 }) => {
-                assert_eq!(got, n, "DictionaryTooShort should report actual input length");
+                assert_eq!(
+                    got, n,
+                    "DictionaryTooShort should report actual input length"
+                );
             }
             Err(e) => panic!("expected DictionaryTooShort for {n} bytes, got {e:?}"),
             Ok(_) => panic!("expected DictionaryTooShort for {n} bytes, got Ok"),
