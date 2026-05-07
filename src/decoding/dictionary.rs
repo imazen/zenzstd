@@ -42,7 +42,22 @@ pub const MAGIC_NUM: [u8; 4] = [0x37, 0xA4, 0x30, 0xEC];
 impl Dictionary {
     /// Parses the dictionary from `raw` and set the tables
     /// it returns the dict_id for checking with the frame's `dict_id``
+    ///
+    /// Returns [`DictionaryDecodeError::DictionaryTooShort`] if `raw` is shorter than the
+    /// 8-byte dictionary header (4-byte magic number + 4-byte dict_id), and
+    /// [`DictionaryDecodeError::MissingOffsetHistory`] if the entropy tables consume the
+    /// input before the trailing 12 rep-offset bytes can be read.
     pub fn decode_dict(raw: &[u8]) -> Result<Dictionary, DictionaryDecodeError> {
+        // Header is 4 bytes magic + 4 bytes dict_id. Indexing without this check
+        // would panic on inputs <8 bytes (CVE-class denial of service).
+        const DICT_HEADER_LEN: usize = 8;
+        if raw.len() < DICT_HEADER_LEN {
+            return Err(DictionaryDecodeError::DictionaryTooShort {
+                got: raw.len(),
+                need: DICT_HEADER_LEN,
+            });
+        }
+
         let mut new_dict = Dictionary {
             id: 0,
             fse: FSEScratch::new(),
@@ -51,12 +66,12 @@ impl Dictionary {
             offset_hist: [2, 4, 8],
         };
 
-        let magic_num: [u8; 4] = raw[..4].try_into().expect("optimized away");
+        let magic_num: [u8; 4] = raw[..4].try_into().expect("len checked above");
         if magic_num != MAGIC_NUM {
             return Err(DictionaryDecodeError::BadMagicNum { got: magic_num });
         }
 
-        let dict_id = raw[4..8].try_into().expect("optimized away");
+        let dict_id = raw[4..8].try_into().expect("len checked above");
         let dict_id = u32::from_le_bytes(dict_id);
         new_dict.id = dict_id;
 
@@ -83,13 +98,22 @@ impl Dictionary {
         )?;
         let raw_tables = &raw_tables[ll_size..];
 
-        let offset1 = raw_tables[0..4].try_into().expect("optimized away");
+        // The 12 rep-offset bytes must follow all entropy tables. Verify before indexing
+        // to avoid panics on truncated dictionaries (CVE-class DoS).
+        const REP_OFFSET_BYTES: usize = 12;
+        if raw_tables.len() < REP_OFFSET_BYTES {
+            return Err(DictionaryDecodeError::MissingOffsetHistory {
+                got: raw_tables.len(),
+            });
+        }
+
+        let offset1 = raw_tables[0..4].try_into().expect("len checked above");
         let offset1 = u32::from_le_bytes(offset1);
 
-        let offset2 = raw_tables[4..8].try_into().expect("optimized away");
+        let offset2 = raw_tables[4..8].try_into().expect("len checked above");
         let offset2 = u32::from_le_bytes(offset2);
 
-        let offset3 = raw_tables[8..12].try_into().expect("optimized away");
+        let offset3 = raw_tables[8..12].try_into().expect("len checked above");
         let offset3 = u32::from_le_bytes(offset3);
 
         new_dict.offset_hist[0] = offset1;

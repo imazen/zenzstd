@@ -260,3 +260,46 @@ fn test_dict_decoding() {
 
     assert!(failed.is_empty());
 }
+
+#[test]
+fn truncated_dictionary_returns_error_does_not_panic() {
+    use crate::decoding::dictionary::Dictionary;
+    use crate::decoding::errors::DictionaryDecodeError;
+
+    // Empty input must not panic — must return DictionaryTooShort.
+    match Dictionary::decode_dict(&[]) {
+        Err(DictionaryDecodeError::DictionaryTooShort { got: 0, need: 8 }) => {}
+        Err(e) => panic!("expected DictionaryTooShort {{got: 0, need: 8}}, got {e:?}"),
+        Ok(_) => panic!("expected DictionaryTooShort {{got: 0, need: 8}}, got Ok"),
+    }
+
+    // 1..7 bytes — all must report DictionaryTooShort, never panic.
+    for n in 1..8usize {
+        let raw: alloc::vec::Vec<u8> = (0..n as u8).collect();
+        match Dictionary::decode_dict(&raw) {
+            Err(DictionaryDecodeError::DictionaryTooShort { got, need: 8 }) => {
+                assert_eq!(
+                    got, n,
+                    "DictionaryTooShort should report actual input length"
+                );
+            }
+            Err(e) => panic!("expected DictionaryTooShort for {n} bytes, got {e:?}"),
+            Ok(_) => panic!("expected DictionaryTooShort for {n} bytes, got Ok"),
+        }
+    }
+
+    // Magic-num-only (4 bytes of correct magic, no dict_id) must also be too short.
+    match Dictionary::decode_dict(&[0x37, 0xA4, 0x30, 0xEC]) {
+        Err(DictionaryDecodeError::DictionaryTooShort { got: 4, need: 8 }) => {}
+        Err(e) => panic!("expected DictionaryTooShort {{got: 4, need: 8}}, got {e:?}"),
+        Ok(_) => panic!("expected DictionaryTooShort {{got: 4, need: 8}}, got Ok"),
+    }
+
+    // 8 bytes of correct magic + dict_id but no entropy tables — must fail with a
+    // structured error, not panic in build_decoder.
+    let header = [0x37u8, 0xA4, 0x30, 0xEC, 0, 0, 0, 0];
+    assert!(
+        Dictionary::decode_dict(&header).is_err(),
+        "expected dictionary header without tables to error"
+    );
+}

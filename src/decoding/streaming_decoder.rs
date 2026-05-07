@@ -45,7 +45,26 @@ use crate::io::{Error, Read};
 pub struct StreamingDecoder<READ: Read, DEC: BorrowMut<FrameDecoder>> {
     pub decoder: DEC,
     source: READ,
+    /// Maximum number of decompressed bytes the [`Read`] impl is allowed to
+    /// emit. Reads past this cap fail with an error rather than allocating
+    /// unbounded memory.
+    ///
+    /// `None` means no cap (legacy behavior). Set via [`Self::set_max_output_size`].
+    /// The 100 MiB internal window cap (see [`crate::common::MAX_WINDOW_SIZE`])
+    /// protects ring-buffer state but **not** the caller's output `Vec`, so
+    /// untrusted input — chained RLE blocks reaching petabyte-scale logical
+    /// output from a few KB of compressed bytes — must always set a cap.
+    max_output_size: Option<usize>,
+    /// Running total of bytes successfully emitted from [`Read::read`].
+    bytes_emitted: u64,
 }
+
+/// Default decompression-output cap used by [`crate::stream::decode_all`] and
+/// [`crate::stream::copy_decode`]. 1 GiB is generous for legitimate use while
+/// still bounding the worst-case decompression-bomb output that fits in a Vec
+/// on a typical host. Use the `_unbounded` helpers if you genuinely trust the
+/// source.
+pub const DEFAULT_DECODE_OUTPUT_CAP: usize = 1024 * 1024 * 1024;
 
 impl<READ: Read, DEC: BorrowMut<FrameDecoder>> StreamingDecoder<READ, DEC> {
     pub fn new_with_decoder(
@@ -53,7 +72,12 @@ impl<READ: Read, DEC: BorrowMut<FrameDecoder>> StreamingDecoder<READ, DEC> {
         mut decoder: DEC,
     ) -> Result<StreamingDecoder<READ, DEC>, FrameDecoderError> {
         decoder.borrow_mut().init(&mut source)?;
-        Ok(StreamingDecoder { decoder, source })
+        Ok(StreamingDecoder {
+            decoder,
+            source,
+            max_output_size: None,
+            bytes_emitted: 0,
+        })
     }
 }
 
@@ -63,7 +87,12 @@ impl<READ: Read> StreamingDecoder<READ, FrameDecoder> {
     ) -> Result<StreamingDecoder<READ, FrameDecoder>, FrameDecoderError> {
         let mut decoder = FrameDecoder::new();
         decoder.init(&mut source)?;
-        Ok(StreamingDecoder { decoder, source })
+        Ok(StreamingDecoder {
+            decoder,
+            source,
+            max_output_size: None,
+            bytes_emitted: 0,
+        })
     }
 }
 
@@ -100,10 +129,65 @@ impl<READ: Read, DEC: BorrowMut<FrameDecoder>> StreamingDecoder<READ, DEC> {
     pub fn into_frame_decoder(self) -> DEC {
         self.decoder
     }
+
+    /// Cap the total number of decompressed bytes this decoder will emit
+    /// across all [`Read::read`] calls. Reads that would push the running
+    /// total past `max` fail with [`crate::io::ErrorKind::InvalidData`] rather
+    /// than continuing to allocate.
+    ///
+    /// This protects against zstd "decompression bombs" where a small
+    /// compressed payload (e.g. chained RLE blocks) expands to gigabytes or
+    /// terabytes of output. The internal 100 MiB window cap protects ring-buffer
+    /// state but **not** the caller's destination buffer.
+    ///
+    /// Pass `None` to remove the cap (use only when the source is fully trusted).
+    pub fn set_max_output_size(&mut self, max: Option<usize>) {
+        self.max_output_size = max;
+    }
+
+    /// Returns the current output-size cap, if any.
+    pub fn max_output_size(&self) -> Option<usize> {
+        self.max_output_size
+    }
 }
 
 impl<READ: Read, DEC: BorrowMut<FrameDecoder>> Read for StreamingDecoder<READ, DEC> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        // Enforce the configured output cap before consuming any further
+        // compressed bytes. We slice `buf` down to `remaining_cap` so callers
+        // that pass an oversized buffer (e.g. read_to_end) cannot push us past
+        // the cap by accident; once `remaining_cap` reaches zero, the next read
+        // returns InvalidData if the frame is not yet finished, and EOF (Ok(0))
+        // if it is — same shape as a truncated underlying reader.
+        let remaining_cap = match self.max_output_size {
+            None => buf.len(),
+            Some(max) => {
+                let emitted = self.bytes_emitted;
+                let cap = max as u64;
+                if emitted >= cap {
+                    // Already at the cap. If decoder still has work to do, this
+                    // is a bomb — surface the failure instead of silently
+                    // truncating. If the decoder is done, it's a clean EOF.
+                    let decoder = self.decoder.borrow_mut();
+                    return if decoder.is_finished() && decoder.can_collect() == 0 {
+                        Ok(0)
+                    } else {
+                        let msg = "zenzstd: decompressed output exceeded max_output_size";
+                        #[cfg(feature = "std")]
+                        {
+                            Err(Error::new(std::io::ErrorKind::InvalidData, msg))
+                        }
+                        #[cfg(not(feature = "std"))]
+                        {
+                            // no_std ErrorKind has no InvalidData variant; use Other.
+                            Err(Error::new(ErrorKind::Other, alloc::boxed::Box::new(msg)))
+                        }
+                    };
+                }
+                (cap - emitted).min(buf.len() as u64) as usize
+            }
+        };
+
         let decoder = self.decoder.borrow_mut();
         if decoder.is_finished() && decoder.can_collect() == 0 {
             //No more bytes can ever be decoded
@@ -115,9 +199,9 @@ impl<READ: Read, DEC: BorrowMut<FrameDecoder>> Read for StreamingDecoder<READ, D
         // So we need to call this until we can actually collect enough bytes
 
         // TODO add BlockDecodingStrategy::UntilCollectable(usize) that pushes this logic into the decode_blocks function
-        while decoder.can_collect() < buf.len() && !decoder.is_finished() {
+        while decoder.can_collect() < remaining_cap && !decoder.is_finished() {
             //More bytes can be decoded
-            let additional_bytes_needed = buf.len() - decoder.can_collect();
+            let additional_bytes_needed = remaining_cap - decoder.can_collect();
             match decoder.decode_blocks(
                 &mut self.source,
                 BlockDecodingStrategy::UptoBytes(additional_bytes_needed),
@@ -138,6 +222,8 @@ impl<READ: Read, DEC: BorrowMut<FrameDecoder>> Read for StreamingDecoder<READ, D
             }
         }
 
-        decoder.read(buf)
+        let n = decoder.read(&mut buf[..remaining_cap])?;
+        self.bytes_emitted = self.bytes_emitted.saturating_add(n as u64);
+        Ok(n)
     }
 }

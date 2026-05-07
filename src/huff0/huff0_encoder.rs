@@ -176,7 +176,7 @@ impl HuffmanTable {
 
         weights.reverse();
         let mut counts_sorted = counts.iter().enumerate().collect::<Vec<_>>();
-        counts_sorted.sort_by(|(_, c1), (_, c2)| c1.cmp(c2));
+        counts_sorted.sort_by_key(|(_, c)| **c);
 
         let mut weights_distributed = alloc::vec![0; counts.len()];
         for (idx, count) in counts_sorted {
