@@ -19,6 +19,9 @@ fuzz-*.log
 *.profdata
 !fuzz/Cargo.lock
 
+# jj VCS directory (colocated with git)
+.jj/
+
 # Tooling noise
 .superwork/
 copter-report/
