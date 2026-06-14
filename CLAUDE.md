@@ -58,6 +58,23 @@ zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 
 ## Known Issues
 
+### ~~Raw-dict roundtrip corruption at L13-15 (BtLazy2)~~ FIXED (#5)
+The BtLazy2 binary-tree match finder (levels 13-15 in the default param table)
+produced a single corrupted byte when compressing with a raw dictionary: a
+back-reference resolved into the dict prefix at a wrong offset, so the decoder
+copied a dict byte where the original differed. Root cause: `prefill_binary_tree`
+seeds dict-prefix positions as an *unsorted* DUBT chain (`tree[larger] =
+ZSTD_DUBT_UNSORTED_MARK`), but `insert_and_find` / `insert_only` traversed the
+tree as if every node were sorted. That violated the `commonLengthSmaller/Larger`
+monotonicity invariant and let `count_match` skip past a real mismatch,
+overstating the match length.
+Fix: port C zstd's two leading loops of `ZSTD_DUBT_findBestMatch` —
+`sort_unsorted_chain` walks the unsorted hash chain and sorts each entry into the
+tree (`insert_dubt1`, a port of `ZSTD_insertDUBT1`) before the sorted traversal.
+Regression: `src/tests/dict_test.rs::dict_roundtrip_{l15,all_levels}_issue5` +
+the `fuzz/regression/dict_roundtrip_l15_issue5` seed exercised by
+`tests/fuzz_regression.rs` (run with `--features fuzz_exports`).
+
 ### ~~Cross-block L5/L7 regression on 1MB repetitive text~~ FIXED
 Fixed in two parts: (1) persistent hash/chain tables across blocks via position shifting
 instead of clearing/repopulating each block; (2) block splitter sampling rate fix to avoid

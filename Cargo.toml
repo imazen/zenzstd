@@ -66,6 +66,9 @@ rand = "0.10.1"
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
 ruzstd = "0.8.2"
 zenbench = { version = "0.1.2"}
+# Used by tests/fuzz_regression.rs to decode fuzz crash seeds with the same
+# `arbitrary` parsing the fuzz targets use. Keep in sync with fuzz/Cargo.toml.
+arbitrary = { version = "1.4.2", features = ["derive"] }
 
 [[bench]]
 name = "decode_all"

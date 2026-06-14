@@ -24,6 +24,21 @@ use super::match_state::{
 };
 
 // ---------------------------------------------------------------------------
+// DUBT sentinel (from C zstd `ZSTD_DUBT_UNSORTED_MARK`)
+// ---------------------------------------------------------------------------
+
+/// Marks a binary-tree node as "inserted into the hash chain but not yet
+/// sorted into the tree". Stored in a position's *larger* child slot. Matches
+/// C zstd's `ZSTD_DUBT_UNSORTED_MARK == 1` in `zstd_compress_internal.h`.
+///
+/// Dict-prefix positions are seeded as unsorted chains by
+/// [`prefill_binary_tree`] (cheap, O(n)); the search lazily sorts them into the
+/// tree on first use via [`BinaryTree::sort_unsorted_chain`], exactly as
+/// `ZSTD_DUBT_findBestMatch` does. A real index that happens to equal `1`
+/// is handled the same way C handles the collision: harmlessly re-sorted.
+const DUBT_UNSORTED_MARK: u32 = 1;
+
+// ---------------------------------------------------------------------------
 // Lazy skipping constant (from C zstd)
 // ---------------------------------------------------------------------------
 
@@ -616,6 +631,154 @@ impl BinaryTree {
         (base, base + 1)
     }
 
+    /// Sort one already-chained-but-unsorted position into the binary tree.
+    ///
+    /// Direct port of C zstd's `ZSTD_insertDUBT1`. The position `curr` was
+    /// linked into the hash chain (its sorted successor is reachable through
+    /// `tree[smaller]`; `tree[larger]` held the previous unsorted candidate,
+    /// which the caller has already saved). This walks down from `curr`'s chain
+    /// successor, comparing byte content, and rewrites `curr`'s two child slots
+    /// so the subtree rooted at `curr` becomes a valid sorted DUBT.
+    ///
+    /// `window_low` is the lowest valid match index; `bt_low` is the lowest
+    /// index still inside the tree window (`curr - bt_mask`, saturating).
+    fn insert_dubt1(
+        &mut self,
+        src: &[u8],
+        curr: usize,
+        n_compares: usize,
+        window_low: usize,
+        bt_low: usize,
+    ) {
+        // `min_match` is unused here: C's `ZSTD_insertDUBT1` compares full byte
+        // content and decides order on the first differing byte, regardless of
+        // the minimum-match threshold (which only matters for *accepting* a
+        // match, not for sorting the tree).
+        let (smaller_idx, larger_idx) = self.children_idx(curr as u32);
+        let mut smaller_slot = smaller_idx;
+        let mut larger_slot = larger_idx;
+        // The unsorted node's sorted successor is reached through tree[smaller].
+        let mut candidate = self.tree[smaller_idx] as usize;
+
+        let mut common_len_smaller: usize = 0;
+        let mut common_len_larger: usize = 0;
+        let mut depth = n_compares;
+
+        // Stop one byte before buffer end so `src[*+match_len]` is in-bounds.
+        let iend = src.len();
+
+        while depth > 0 && candidate > window_low && candidate < curr {
+            let match_len_min = common_len_smaller.min(common_len_larger);
+            let remaining_a = &src[curr + match_len_min..];
+            let remaining_b = if candidate + match_len_min < iend {
+                &src[candidate + match_len_min..]
+            } else {
+                &[][..]
+            };
+            let match_len = match_len_min + count_match(remaining_a, remaining_b);
+
+            // Equal up to buffer end: can't decide order — drop to keep the tree
+            // consistent (C: "miss a bit of compression, but other solutions can
+            // corrupt tree").
+            if curr + match_len >= iend || candidate + match_len >= iend {
+                break;
+            }
+
+            let (child_smaller_idx, child_larger_idx) = self.children_idx(candidate as u32);
+            if src[candidate + match_len] < src[curr + match_len] {
+                // candidate is smaller than curr
+                self.tree[smaller_slot] = candidate as u32;
+                common_len_smaller = match_len;
+                if candidate <= bt_low {
+                    smaller_slot = larger_idx; // dummy: overwritten below
+                    break;
+                }
+                smaller_slot = child_larger_idx;
+                candidate = self.tree[child_larger_idx] as usize;
+            } else {
+                // candidate is larger than curr
+                self.tree[larger_slot] = candidate as u32;
+                common_len_larger = match_len;
+                if candidate <= bt_low {
+                    larger_slot = smaller_idx; // dummy: overwritten below
+                    break;
+                }
+                larger_slot = child_smaller_idx;
+                candidate = self.tree[child_smaller_idx] as usize;
+            }
+            depth -= 1;
+        }
+
+        self.tree[smaller_slot] = 0;
+        self.tree[larger_slot] = 0;
+    }
+
+    /// Walk the unsorted candidate chain reachable from `head` and sort every
+    /// unsorted entry into the tree, returning the first still-sorted index
+    /// (the entry point for the subsequent sorted traversal).
+    ///
+    /// Direct port of the two leading loops of `ZSTD_DUBT_findBestMatch`
+    /// ("reach end of unsorted candidates list" + "batch sort stacked
+    /// candidates"). Without this, dict-prefix nodes seeded by
+    /// [`prefill_binary_tree`] are traversed as if they were sorted tree nodes,
+    /// which violates the `common_len` monotonicity invariant and produces
+    /// matches whose back-reference bytes differ from the forward bytes — i.e.
+    /// silent roundtrip corruption (issue #5).
+    ///
+    /// `unsort_limit = max(bt_low, window_low)`: below it, entries are out of the
+    /// tree window and are never treated as unsorted.
+    fn sort_unsorted_chain(
+        &mut self,
+        src: &[u8],
+        head: usize,
+        search_depth: usize,
+        window_low: usize,
+        bt_low: usize,
+    ) {
+        let unsort_limit = bt_low.max(window_low);
+        let mut match_index = head;
+        // `nbCandidates` in C: starts at the search budget, decremented while
+        // walking the unsorted chain, then re-incremented and used as the
+        // per-entry compare budget when sorting (so later entries — already
+        // partly sorted — get a larger budget).
+        let mut n_candidates = search_depth;
+        let mut previous_candidate: u32 = 0;
+
+        // Reach the end of the unsorted candidate list, reversing the chain via
+        // the `larger` (unsortedMark) slots so we can walk back up and sort.
+        while match_index > unsort_limit
+            && n_candidates > 1
+            && self.tree[self.children_idx(match_index as u32).1] == DUBT_UNSORTED_MARK
+        {
+            let (smaller_idx, larger_idx) = self.children_idx(match_index as u32);
+            // unsortedMark becomes a reversed chain back to the previous entry.
+            self.tree[larger_idx] = previous_candidate;
+            previous_candidate = match_index as u32;
+            match_index = self.tree[smaller_idx] as usize;
+            n_candidates -= 1;
+        }
+
+        // Nullify the last candidate if it's still unsorted (C simplification:
+        // detrimental to ratio, beneficial for speed — and keeps the tree sound).
+        if match_index > unsort_limit {
+            let (smaller_idx, larger_idx) = self.children_idx(match_index as u32);
+            if self.tree[larger_idx] == DUBT_UNSORTED_MARK {
+                self.tree[smaller_idx] = 0;
+                self.tree[larger_idx] = 0;
+            }
+        }
+
+        // Batch-sort the stacked candidates (the reversed chain) into the tree.
+        let mut to_sort = previous_candidate;
+        while to_sort != 0 {
+            let (_smaller_idx, larger_idx) = self.children_idx(to_sort);
+            let next = self.tree[larger_idx];
+            self.insert_dubt1(src, to_sort as usize, n_candidates, window_low, bt_low);
+            to_sort = next;
+            n_candidates += 1;
+        }
+    }
+
     /// Update the tree: insert positions from `next_to_update` up to (not including) `target`.
     /// This is C zstd's `ZSTD_updateDUBT`.
     pub fn update_tree(
@@ -660,9 +823,16 @@ impl BinaryTree {
 
         let h = hash_ptr(&src[pos..], self.hash_log, min_match as u32);
         let match_index = self.hash_table[h] as usize;
-        self.hash_table[h] = pos as u32;
 
         let bt_low = pos.saturating_sub(self.bt_mask as usize);
+
+        // Sort any unsorted candidates (e.g. dict-prefix nodes seeded by
+        // `prefill_binary_tree`) into the tree before traversing it as sorted.
+        // Must run while the hash chain still starts at `match_index`, i.e.
+        // before overwriting the hash head with `pos`.
+        self.sort_unsorted_chain(src, match_index, search_depth, window_low, bt_low);
+
+        self.hash_table[h] = pos as u32;
 
         let (smaller_idx, larger_idx) = self.children_idx(pos as u32);
         let mut smaller_slot = smaller_idx;
@@ -871,9 +1041,14 @@ impl BinaryTree {
 
         let h = hash_ptr(&src[pos..], self.hash_log, min_match as u32);
         let match_index = self.hash_table[h] as usize;
-        self.hash_table[h] = pos as u32;
 
         let bt_low = pos.saturating_sub(self.bt_mask as usize);
+
+        // Sort any unsorted dict-prefix candidates before treating the chain as
+        // a sorted tree (see `insert_and_find` / issue #5).
+        self.sort_unsorted_chain(src, match_index, search_depth, window_low, bt_low);
+
+        self.hash_table[h] = pos as u32;
 
         let (smaller_idx, larger_idx) = self.children_idx(pos as u32);
         let mut smaller_slot = smaller_idx;

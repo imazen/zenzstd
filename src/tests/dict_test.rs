@@ -303,3 +303,95 @@ fn truncated_dictionary_returns_error_does_not_panic() {
         "expected dictionary header without tables to error"
     );
 }
+
+/// Regression for issue #5: raw-dictionary roundtrip corruption at L15.
+/// The fuzz target `fuzz_dict_roundtrip` found that compressing this 18-byte
+/// input with this 12-byte raw dictionary at `CompressionLevel::Level(15)`
+/// produced a frame that decoded with a single corrupted byte: index 9 came
+/// back as `0x23` (a byte from the dictionary) instead of the original `0xff`.
+#[test]
+fn dict_roundtrip_l15_issue5() {
+    use crate::decoding::FrameDecoder;
+    use crate::decoding::dictionary::Dictionary;
+    use crate::decoding::scratch::{FSEScratch, HuffmanScratch};
+    use crate::encoding::{CompressionLevel, EncoderDictionary, compress_to_vec_with_dict};
+    use alloc::vec;
+
+    let dict_content: vec::Vec<u8> = vec![
+        0xff, 0xff, 0xff, 0x23, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf7,
+    ];
+    let data: vec::Vec<u8> = vec![
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xef, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xf7,
+    ];
+    let dict_id = 1258291199u32;
+
+    let enc_dict = EncoderDictionary::new_raw(dict_id, dict_content.clone());
+    let compressed =
+        compress_to_vec_with_dict(data.as_slice(), CompressionLevel::Level(15), &enc_dict);
+
+    let dec_dict = Dictionary {
+        id: dict_id,
+        fse: FSEScratch::new(),
+        huf: HuffmanScratch::new(),
+        dict_content: dict_content.clone(),
+        offset_hist: [1, 4, 8],
+    };
+    let mut decoder = FrameDecoder::new();
+    decoder.add_dict(dec_dict).unwrap();
+
+    let mut decompressed = vec::Vec::with_capacity(data.len());
+    decoder
+        .decode_all_to_vec(&compressed, &mut decompressed)
+        .unwrap();
+
+    assert_eq!(
+        data, decompressed,
+        "raw-dict L15 roundtrip must be lossless"
+    );
+}
+
+/// The issue-#5 dict/data must round-trip losslessly at *every* level, not just
+/// L15. The original bug was specific to the BtLazy2 match finder (L13-15 in the
+/// default param table), so sweeping all levels guards against the same
+/// unsorted-tree-traversal defect resurfacing in any strategy.
+#[test]
+fn dict_roundtrip_all_levels_issue5() {
+    use crate::decoding::FrameDecoder;
+    use crate::decoding::dictionary::Dictionary;
+    use crate::decoding::scratch::{FSEScratch, HuffmanScratch};
+    use crate::encoding::{CompressionLevel, EncoderDictionary, compress_to_vec_with_dict};
+    use alloc::vec;
+
+    let dict_content: vec::Vec<u8> = vec![
+        0xff, 0xff, 0xff, 0x23, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf7,
+    ];
+    let data: vec::Vec<u8> = vec![
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xef, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xf7,
+    ];
+    let dict_id = 1258291199u32;
+
+    for lvl in 1..=22i32 {
+        let enc_dict = EncoderDictionary::new_raw(dict_id, dict_content.clone());
+        let compressed =
+            compress_to_vec_with_dict(data.as_slice(), CompressionLevel::Level(lvl), &enc_dict);
+        let dec_dict = Dictionary {
+            id: dict_id,
+            fse: FSEScratch::new(),
+            huf: HuffmanScratch::new(),
+            dict_content: dict_content.clone(),
+            offset_hist: [1, 4, 8],
+        };
+        let mut decoder = FrameDecoder::new();
+        decoder.add_dict(dec_dict).unwrap();
+        let mut decompressed = vec::Vec::with_capacity(data.len());
+        decoder
+            .decode_all_to_vec(&compressed, &mut decompressed)
+            .unwrap_or_else(|e| panic!("L{lvl}: decode failed: {e:?}"));
+        assert_eq!(
+            data, decompressed,
+            "L{lvl}: raw-dict roundtrip must be lossless"
+        );
+    }
+}

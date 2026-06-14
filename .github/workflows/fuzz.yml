@@ -87,5 +87,7 @@ jobs:
       - name: Regression seeds
         run: |
           if [ -d fuzz/regression ] && [ "$(ls fuzz/regression/ 2>/dev/null | wc -l)" -gt 0 ]; then
-            cargo test --test fuzz_regression 2>/dev/null || echo "No regression test found — seeds exist but no test harness"
+            # fuzz_exports exposes the decoder Dictionary/scratch types the
+            # dict-roundtrip seeds need (matches the fuzz crate's feature set).
+            cargo test --features fuzz_exports --test fuzz_regression
           fi
