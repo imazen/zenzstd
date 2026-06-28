@@ -11,25 +11,7 @@ The decoder builds on the well-maintained [`ruzstd`](https://crates.io/crates/ru
 zenzstd = "0.1.0"
 ```
 
-The one-shot helpers compress or decompress a whole buffer in a single call (available with or without `std`):
-
-```rust
-use zenzstd::CompressionLevel;
-
-let data: &[u8] = b"the quick brown fox jumps over the lazy dog, again and again";
-
-// Compress at level 3 (Zstandard's default).
-let compressed = zenzstd::compress(data, CompressionLevel::Default);
-
-// Decompress with a mandatory output ceiling. A zstd frame carries an
-// attacker-controlled content size, so `decompress` always caps output — here
-// at 64 KiB — and errors rather than allocating unbounded memory. Pass
-// `usize::MAX` only for fully trusted input.
-let restored = zenzstd::decompress(&compressed, 64 * 1024).unwrap();
-assert_eq!(restored, data);
-```
-
-For `std::io` readers and writers, the `stream` module mirrors the `zstd` crate's helpers (requires the default `std` feature):
+The `stream` module mirrors the `zstd` crate's one-shot helpers (requires the default `std` feature):
 
 ```rust
 use zenzstd::stream;
