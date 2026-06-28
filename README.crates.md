@@ -1,4 +1,6 @@
-# zenzstd [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenzstd/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenzstd/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/zenzstd?style=flat-square)](https://crates.io/crates/zenzstd) [![lib.rs](https://img.shields.io/crates/v/zenzstd?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/zenzstd) [![docs.rs](https://img.shields.io/docsrs/zenzstd?style=flat-square)](https://docs.rs/zenzstd) [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?style=flat-square)](#minimum-supported-rust-version) [![license](https://img.shields.io/crates/l/zenzstd?style=flat-square)](#license)
+<!-- GENERATED FROM README.md by zenutils gen-readme-crates.sh — DO NOT EDIT. -->
+
+# zenzstd [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenzstd/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenzstd/actions/workflows/ci.yml)
 
 A pure-Rust [Zstandard](https://www.rfc-editor.org/rfc/rfc8878) (RFC 8878) compressor and decompressor. `#![forbid(unsafe_code)]` by default and `no_std + alloc`, so it runs anywhere from servers to embedded targets to WebAssembly.
 
@@ -109,18 +111,6 @@ zenzstd = { version = "0.1.0", default-features = false, features = ["hash"] }
 
 By default the crate is `#![forbid(unsafe_code)]`. Enabling `unsafe-decompress` or `unsafe-compress` switches it to `#![deny(unsafe_code)]`, with `unsafe` permitted only inside small, documented `unsafe_ops` modules in the hot paths. The safe-by-default build is the one fuzzed and tested in CI.
 
-<!-- crates.io:skip-start -->
-## Benchmarks
-
-zenzstd ships two comparison harnesses against the reference C library (`zstd` crate, bundled libzstd) and upstream [`ruzstd`](https://crates.io/crates/ruzstd). Results are machine-specific — reproduce on your own hardware:
-
-```sh
-cargo bench --bench compress_compare    # zenbench: ratio + encode + decode vs C zstd
-cargo run --release --example compare   # quick table across levels and datasets
-```
-
-At levels 1-15 the encoder is competitive with the reference library on compression ratio while trading encode speed for memory safety; the decoder (built on ruzstd) is competitive with C `zstd` on typical inputs. Methodology, environment, pinned competitor versions, and exact repro commands live in **[benchmarks/README.md](https://github.com/imazen/zenzstd/blob/main/benchmarks/README.md)**. No fixed throughput numbers are published here because they vary by CPU; run the harness for figures on your machine.
-<!-- crates.io:skip-end -->
 
 ## Fuzzing
 

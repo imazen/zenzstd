@@ -8,7 +8,7 @@ description = "Pure Rust Zstandard (zstd) compression and decompression — forb
 repository = "https://github.com/imazen/zenzstd"
 keywords = ["zstd", "zstandard", "compression", "decompression", "no_std"]
 categories = ["compression", "no-std"]
-readme = "README.md"
+readme = "README.crates.md"
 exclude = [
     "vendor/",
     "decodecorpus_files/",

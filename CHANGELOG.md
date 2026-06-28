@@ -6,6 +6,9 @@ breaking changes bump the minor version.
 
 ## [Unreleased]
 
+### Changed
+- README overhaul: corrected feature defaults (`simd` ships on by default), documented the experimental level 16-22 status and the 1 GiB decode-bomb output cap, added the standard badge row + MSRV badge, and split the crates.io README into `README.crates.md`.
+
 ### Fixed
 - Raw-dictionary compress/decompress roundtrip corruption at compression levels
   13-15 (the BtLazy2 binary-tree match finder). Dict-prefix positions were seeded
