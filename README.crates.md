@@ -1,6 +1,6 @@
 <!-- GENERATED FROM README.md by zenutils gen-readme-crates.sh — DO NOT EDIT. -->
 
-# zenzstd [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenzstd/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenzstd/actions/workflows/ci.yml)
+# zenzstd
 
 A pure-Rust [Zstandard](https://www.rfc-editor.org/rfc/rfc8878) (RFC 8878) compressor and decompressor. `#![forbid(unsafe_code)]` by default and `no_std + alloc`, so it runs anywhere from servers to embedded targets to WebAssembly.
 
