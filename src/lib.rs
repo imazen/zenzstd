@@ -144,9 +144,10 @@ pub fn compress(data: &[u8], level: CompressionLevel) -> alloc::vec::Vec<u8> {
 /// A zstd frame carries an attacker-controlled content size, and a few KB of
 /// crafted RLE blocks can expand to terabytes of output. `max_output_size` is a
 /// hard ceiling on the decompressed length: if decoding would exceed it, this
-/// returns an error — the same limit error [`decoding::StreamingDecoder`]
-/// produces via [`decoding::StreamingDecoder::set_max_output_size`] — instead of
-/// allocating unbounded memory. Pass `usize::MAX` only for fully trusted input.
+/// returns [`DecompressError::OutputSizeExceeded`] — the same cap
+/// [`decoding::StreamingDecoder`] enforces via
+/// [`decoding::StreamingDecoder::set_max_output_size`] — instead of allocating
+/// unbounded memory. Pass `usize::MAX` only for fully trusted input.
 ///
 /// Expects the input to contain exactly one frame (see
 /// [`decoding::StreamingDecoder`] for the multi-frame caveat). For incremental
@@ -163,28 +164,80 @@ pub fn compress(data: &[u8], level: CompressionLevel) -> alloc::vec::Vec<u8> {
 /// let restored = zenzstd::decompress(&compressed, 64 * 1024).unwrap();
 /// assert_eq!(restored, data);
 /// ```
-pub fn decompress(data: &[u8], max_output_size: usize) -> Result<alloc::vec::Vec<u8>, io::Error> {
-    let mut decoder = decoding::StreamingDecoder::new(data).map_err(map_frame_decoder_error)?;
+pub fn decompress(
+    data: &[u8],
+    max_output_size: usize,
+) -> Result<alloc::vec::Vec<u8>, DecompressError> {
+    let mut decoder =
+        decoding::StreamingDecoder::new(data).map_err(DecompressError::InvalidInput)?;
     decoder.set_max_output_size(Some(max_output_size));
     let mut out = alloc::vec::Vec::new();
-    io::Read::read_to_end(&mut decoder, &mut out)?;
+    io::Read::read_to_end(&mut decoder, &mut out).map_err(|e| {
+        // `StreamingDecoder::read` never writes past the configured cap (see
+        // its `Read` impl), so the running output length can only reach
+        // `max_output_size` exactly by hitting the cap — a genuine decode
+        // failure (corrupt block, truncated stream, checksum mismatch, ...)
+        // always surfaces strictly before that point. This lets us recover
+        // which of the two happened from the one `io::Error` the streaming
+        // reader returns, without needing it to carry a typed cause itself.
+        if out.len() >= max_output_size {
+            DecompressError::OutputSizeExceeded { max_output_size }
+        } else {
+            DecompressError::Decompressor(e)
+        }
+    })?;
     Ok(out)
 }
 
-/// Convert a [`decoding::errors::FrameDecoderError`] from frame initialization
-/// into the crate's I/O error type, matching the mapping used by
-/// [`crate::stream`] and [`decoding::StreamingDecoder`]'s `Read` impl.
-fn map_frame_decoder_error(e: decoding::errors::FrameDecoderError) -> io::Error {
-    #[cfg(feature = "std")]
-    {
-        io::Error::new(io::ErrorKind::InvalidData, alloc::format!("{e:?}"))
+/// Error returned by the one-shot [`decompress`] helper.
+///
+/// Distinguishes three distinct failure modes so callers can react
+/// appropriately instead of pattern-matching an opaque I/O error message:
+/// malformed input should simply be rejected, an exceeded output cap usually
+/// means either raising the cap or treating the input as a probable
+/// decompression bomb, and an underlying decompressor error means the frame
+/// parsed fine but its block data was corrupt or truncated.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DecompressError {
+    /// The input could not be parsed as a valid Zstandard frame — bad magic
+    /// number, invalid frame descriptor, unsupported/oversized window, and so
+    /// on. Surfaced by [`decoding::StreamingDecoder::new`].
+    InvalidInput(decoding::errors::FrameDecoderError),
+    /// Decoding would have produced more than `max_output_size` bytes of
+    /// output. Raise the cap if the input is fully trusted, or treat this as
+    /// a likely decompression bomb.
+    OutputSizeExceeded {
+        /// The cap that was passed to [`decompress`].
+        max_output_size: usize,
+    },
+    /// The frame header parsed successfully but decoding its block data
+    /// failed partway through — corrupt sequences, a truncated stream, a
+    /// checksum mismatch, and so on.
+    Decompressor(io::Error),
+}
+
+impl core::fmt::Display for DecompressError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DecompressError::InvalidInput(e) => write!(f, "invalid zstd frame: {e}"),
+            DecompressError::OutputSizeExceeded { max_output_size } => write!(
+                f,
+                "decompressed output exceeded max_output_size ({max_output_size} bytes)"
+            ),
+            DecompressError::Decompressor(e) => write!(f, "zstd decompression failed: {e}"),
+        }
     }
-    #[cfg(not(feature = "std"))]
-    {
-        io::Error::new(
-            io::ErrorKind::Other,
-            alloc::boxed::Box::new(alloc::format!("{e:?}")),
-        )
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for DecompressError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DecompressError::InvalidInput(e) => Some(e),
+            DecompressError::OutputSizeExceeded { .. } => None,
+            DecompressError::Decompressor(e) => Some(e),
+        }
     }
 }
 

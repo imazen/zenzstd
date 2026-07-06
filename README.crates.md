@@ -25,11 +25,17 @@ let compressed = zenzstd::compress(data, CompressionLevel::Default);
 
 // Decompress with a mandatory output ceiling. A zstd frame carries an
 // attacker-controlled content size, so `decompress` always caps output — here
-// at 64 KiB — and errors rather than allocating unbounded memory. Pass
-// `usize::MAX` only for fully trusted input.
+// at 64 KiB — and returns a `DecompressError` rather than allocating
+// unbounded memory. Pass `usize::MAX` only for fully trusted input.
 let restored = zenzstd::decompress(&compressed, 64 * 1024).unwrap();
 assert_eq!(restored, data);
 ```
+
+`DecompressError` distinguishes three failure modes: `InvalidInput` (the
+bytes aren't a valid Zstandard frame), `OutputSizeExceeded` (decoding would
+have exceeded `max_output_size`), and `Decompressor` (the frame parsed but its
+block data was corrupt or truncated). It implements `Display` unconditionally
+and `std::error::Error` behind the `std` feature.
 
 For `std::io` readers and writers, the `stream` module mirrors the `zstd` crate's helpers (requires the default `std` feature):
 
