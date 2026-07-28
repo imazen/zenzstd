@@ -21,7 +21,12 @@ Pure Rust zstd compression/decompression. Fork of ruzstd 0.8.2, extended with fu
 - `src/fse/` — FSE (Finite State Entropy) encoder/decoder
 - `src/huff0/` — Huffman encoder/decoder
 - `block_splitter.rs` — Pre-split (fingerprint-based, port of C zstd_preSplit.c) + post-split (trial-encode sequence splitting)
-- `vendor/zstd/` — C zstd submodule for reference
+- `vendor/zstd/` — C zstd submodule for reference. **Run
+  `git submodule update --init --depth 1 vendor/zstd` on a fresh checkout**:
+  without it the 7 `tests::conformance::golden_*` tests fail with
+  `NotFound: No such file or directory` (they read
+  `vendor/zstd/tests/golden-decompression/*.zst` directly). That failure looks
+  like a real conformance break and is not one — it cost time on 2026-07-28.
 
 ## Key Design Decisions
 
