@@ -53,6 +53,21 @@ pub mod decoding;
 pub mod dictionary;
 pub mod encoding;
 
+/// Dev-only access to the match-length kernel, for `benches/kernel_tiers.rs`.
+///
+/// NOT public API. `count_match` is the LZ inner loop — it runs at every
+/// candidate position during encode — and lives in a `pub(crate)` module. The
+/// existing benches measure whole compression, which cannot reveal this kernel
+/// being SLOWER than its own scalar fallback; that failure mode was real in
+/// the 2026-07-28 aarch64 sweep (three zenfilters NEON kernels lost to their
+/// scalar tier).
+#[doc(hidden)]
+pub mod __bench_match {
+    pub fn count_match(a: &[u8], b: &[u8]) -> usize {
+        crate::encoding::simd::count_match(a, b)
+    }
+}
+
 pub(crate) mod blocks;
 
 #[cfg(feature = "fuzz_exports")]

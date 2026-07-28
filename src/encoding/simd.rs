@@ -28,11 +28,32 @@
 /// `simd` feature, falls back to 8-byte scalar chunking.
 #[inline(always)]
 pub fn count_match(a: &[u8], b: &[u8]) -> usize {
-    #[cfg(feature = "simd")]
+    // aarch64 deliberately uses the u64 path, NOT the vector one.
+    //
+    // The vector algorithm is XOR + movemask + trailing_zeros. On x86 the
+    // movemask is a single instruction; NEON has no equivalent and must
+    // narrow/extract across several instructions, which costs more than it
+    // saves at the match lengths that actually occur. Measured per-tier on
+    // Apple Silicon (benches/kernel_tiers.rs, shared-prefix length swept):
+    //
+    //   shared    4 B   neon 6.96 ns  vs u64 4.65 ns   u64 33% faster
+    //   shared   16 B   neon 7.97 ns  vs u64 5.10 ns   u64 36% faster
+    //   shared   64 B   neon 10.6 ns  vs u64  9.2 ns   u64 13% faster
+    //   shared  512 B   neon 37.8 ns  vs u64 44.4 ns   neon 18% faster
+    //   shared 16 KiB   neon  1.2 us  vs u64  1.2 us   tied
+    //
+    // So the vector path only wins in a narrow band around 512 bytes. LZ match
+    // lengths are dominated by short matches (zstd's minimum is 3-4 bytes and
+    // the distribution decays fast), so the common case was paying 33-36% for
+    // a win that almost never applies.
+    //
+    // x86 keeps the vector path: movemask makes the tradeoff genuinely
+    // different there, and it is unmeasurable from this machine.
+    #[cfg(all(feature = "simd", not(target_arch = "aarch64")))]
     {
         archmage::incant!(count_match(a, b), [v3, neon, wasm128, scalar])
     }
-    #[cfg(not(feature = "simd"))]
+    #[cfg(any(not(feature = "simd"), target_arch = "aarch64"))]
     {
         count_match_u64(a, b)
     }

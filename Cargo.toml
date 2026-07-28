@@ -61,6 +61,9 @@ archmage = { version = "0.9.15", optional = true }
 magetypes = { version = "0.9.15", optional = true }
 
 [dev-dependencies]
+# DEV-only: lets benches/kernel_tiers.rs disable the baseline SIMD token so
+# the "scalar" arm is real. Feature unification keeps this to test/bench builds.
+archmage = { version = "0.9.28", features = ["testable_dispatch"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 rand = "0.10.1"
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
@@ -78,4 +81,13 @@ harness = false
 [[bench]]
 name = "compress_compare"
 path = "benches/compress_compare.rs"
+harness = false
+
+[[bench]]
+name = "kernel_tiers"
+harness = false
+required-features = ["simd"]
+
+[[bench]]
+name = "compress_e2e"
 harness = false
