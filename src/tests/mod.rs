@@ -583,6 +583,7 @@ pub mod encode_corpus;
 pub mod fuzz_regressions;
 #[cfg(feature = "std")]
 pub mod level_roundtrip;
+pub mod one_shot;
 
 #[cfg(feature = "std")]
 #[test]
