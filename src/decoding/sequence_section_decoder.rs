@@ -690,8 +690,6 @@ pub fn decode_and_execute_sequences(
 /// and wider memory operations in the hot loop.
 #[cfg_attr(feature = "simd", archmage::autoversion)]
 #[cfg_attr(not(feature = "simd"), inline(always))]
-#[allow(clippy::needless_range_loop)]
-#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)] // autoversion generates the actual called variants
 fn fused_decode_execute_fast_inner(
     section: &SequencesHeader,
@@ -946,8 +944,6 @@ fn fused_decode_execute_fast_inner(
 
 /// Fused decode+execute with RLE mode support.
 /// Takes destructured scratch fields to avoid borrow conflicts.
-#[allow(clippy::needless_range_loop)]
-#[allow(clippy::too_many_arguments)]
 fn fused_decode_execute_rle_inner(
     section: &SequencesHeader,
     br: &mut BitReaderReversed<'_>,
