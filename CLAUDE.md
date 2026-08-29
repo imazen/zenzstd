@@ -133,12 +133,17 @@ correctly. This is a match finder bug, not an entropy coding issue.
 
 ## Features
 
-- `default` = ["hash", "std"]
+- `default` = ["hash", "std", "simd"]
 - `std` — enables std::io traits, StreamingEncoder
 - `hash` — enables xxhash64 checksums in frames
 - `dict_builder` — dictionary training (from ruzstd)
 - `fuzz_exports` — exposes FSE/Huffman internals
-- `simd` — AVX2 acceleration via archmage/magetypes
+- `simd` — SIMD `count_match` via archmage/magetypes. AVX2 on x86_64, u8x16 on
+  wasm32. **aarch64 deliberately uses the scalar u64 path** — the NEON dispatch
+  was measured slower at the short match lengths that dominate (see the comment
+  in `encoding/simd.rs`), so the feature is a no-op for `count_match` there.
+- `unsafe-decompress` / `unsafe-compress` — opt-in unchecked indexing in hot
+  paths. Off by default; the crate is `#![forbid(unsafe_code)]` without them.
 
 ## Commands
 
