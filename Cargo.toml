@@ -67,7 +67,7 @@ archmage = { version = "0.9.28", features = ["testable_dispatch"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 rand = "0.10.1"
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
-ruzstd = "0.8.2"
+ruzstd = "0.9.0"
 zenbench = { version = "0.1.2"}
 # Used by tests/fuzz_regression.rs to decode fuzz crash seeds with the same
 # `arbitrary` parsing the fuzz targets use. Keep in sync with fuzz/Cargo.toml.
