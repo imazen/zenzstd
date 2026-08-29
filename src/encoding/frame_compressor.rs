@@ -7,8 +7,8 @@ use core::convert::TryInto;
 
 use super::{
     CompressionLevel, EncoderDictionary, Matcher, block_header::BlockHeader,
-    frame_header::FrameHeader, levels::*, match_generator::MatchGeneratorDriver,
-    zstd_match::MatchState,
+    compress_params::encoder_params_for_level, frame_header::FrameHeader, levels::*,
+    match_generator::MatchGeneratorDriver, zstd_match::MatchState,
 };
 use crate::fse::fse_encoder::{FSETable, default_ll_table, default_ml_table, default_of_table};
 
@@ -72,6 +72,37 @@ pub(crate) struct CompressState<M: Matcher> {
     pub(crate) matcher: M,
     pub(crate) last_huff_table: Option<crate::huff0::huff0_encoder::HuffmanTable>,
     pub(crate) fse_tables: FseTables,
+}
+
+/// The `Window_Size` the frame header must declare for `level`.
+///
+/// A decoder sizes its history buffer from this number, so it has to be at
+/// least the largest back-reference distance the match finder that will
+/// *actually run* for `level` can emit. Getting it from the wrong match finder
+/// is issue #9: the header said 128 KiB for every level while `MatchState`
+/// reached up to 4 MiB back, and C zstd — which, unlike our own decoder, keeps
+/// exactly what it was told to keep — read the far offsets as garbage.
+///
+/// So this function must stay the *only* place either encoder computes the
+/// declared window, and each arm must ask the same source the corresponding
+/// match finder is bounded by:
+///
+/// * `Uncompressed` emits raw blocks and no back-references at all; the
+///   driver's window is an honest over-declaration.
+/// * `Fastest` matches through the [`Matcher`], so ask the matcher.
+/// * Every other level matches through [`MatchState`], whose search bounds
+///   `dist <= encoder_params_for_level(level, None).window_size()` and whose
+///   retained history is capped at the same value.
+pub(crate) fn header_window_size<M: Matcher>(level: CompressionLevel, matcher: &M) -> u64 {
+    match level {
+        CompressionLevel::Uncompressed | CompressionLevel::Fastest => matcher.window_size(),
+        CompressionLevel::Default
+        | CompressionLevel::Better
+        | CompressionLevel::Best
+        | CompressionLevel::Level(_) => {
+            encoder_params_for_level(level.to_level(), None).window_size() as u64
+        }
+    }
 }
 
 impl<R: Read, W: Write> FrameCompressor<R, W, MatchGeneratorDriver> {
@@ -168,7 +199,10 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
             single_segment: false,
             content_checksum: cfg!(feature = "hash"),
             dictionary_id: dict_id,
-            window_size: Some(self.state.matcher.window_size()),
+            window_size: Some(header_window_size(
+                self.compression_level,
+                &self.state.matcher,
+            )),
         };
         header.serialize(output);
 
@@ -230,7 +264,11 @@ impl<R: Read, W: Write, M: Matcher> FrameCompressor<R, W, M> {
                     // Lazily create the cross-block match state on the first
                     // zstd-level block. This persists across all blocks in
                     // the frame, allowing cross-block match references.
-                    let params = crate::encoding::compress_params::params_for_level(level, None);
+                    //
+                    // `encoder_params_for_level`, with the same arguments
+                    // `header_window_size` used above — that is what keeps the
+                    // declared window equal to the reachable one.
+                    let params = encoder_params_for_level(level, None);
                     if self.match_state.is_none() {
                         self.match_state = Some(MatchState::new(&params));
                     }

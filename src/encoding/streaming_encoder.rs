@@ -9,7 +9,8 @@ use alloc::vec::Vec;
 use core::convert::TryInto;
 
 use super::block_header::BlockHeader;
-use super::frame_compressor::{CompressState, FseTables};
+use super::compress_params::encoder_params_for_level;
+use super::frame_compressor::{CompressState, FseTables, header_window_size};
 use super::frame_header::FrameHeader;
 use super::levels::*;
 use super::match_generator::MatchGeneratorDriver;
@@ -102,7 +103,7 @@ impl<W: io::Write> StreamingEncoder<W> {
             single_segment: false,
             content_checksum: cfg!(feature = "hash"),
             dictionary_id: dict_id,
-            window_size: Some(self.state.matcher.window_size()),
+            window_size: Some(header_window_size(self.level, &self.state.matcher)),
         };
 
         let mut header_bytes = Vec::with_capacity(16);
@@ -158,8 +159,10 @@ impl<W: io::Write> StreamingEncoder<W> {
             | CompressionLevel::Level(_) => {
                 let level_num = self.level.to_level();
 
-                // Lazily create cross-block match state
-                let params = crate::encoding::compress_params::params_for_level(level_num, None);
+                // Lazily create cross-block match state. Same call as
+                // `header_window_size` makes, so the window this state retains
+                // is the window the frame header declared.
+                let params = encoder_params_for_level(level_num, None);
                 if self.match_state.is_none() {
                     self.match_state = Some(MatchState::new(&params));
                 }

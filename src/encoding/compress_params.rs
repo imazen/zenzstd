@@ -224,6 +224,46 @@ pub fn params_for_level(level: i32, src_size: Option<u64>) -> CompressionParams 
     table[level]
 }
 
+/// The largest `window_log` this encoder will ever match with, whatever the
+/// level's table entry says.
+///
+/// The zstd format itself allows far more (`Window_Size` up to 3.75 TB), and
+/// [`params_for_level`] faithfully reproduces C zstd's `clevels.h`, which goes
+/// up to `window_log 27` (128 MiB) at level 22. Two limits sit below that:
+///
+/// * The format spec recommends encoders not require more than 8 MiB, because
+///   that is the floor decoders are asked to support:
+///   <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#window_descriptor>
+/// * This crate's own decoder refuses anything over 100 MiB
+///   (`MAXIMUM_ALLOWED_WINDOW_SIZE` in `decoding/frame_decoder.rs`), so an
+///   honest `window_log 27` declaration would produce frames we cannot read
+///   back ourselves.
+///
+/// Capping here — rather than lying in the frame header — keeps the declared
+/// window and the reachable window the same number. The cap only changes
+/// behaviour for inputs larger than 8 MiB at levels 20-22, where matches
+/// further back than 8 MiB are no longer searched for.
+pub(crate) const MAX_ENCODER_WINDOW_LOG: u32 = 23;
+
+/// The parameters the encoder will actually run with for `level`/`src_size`.
+///
+/// Identical to [`params_for_level`] except that `window_log` is capped at
+/// [`MAX_ENCODER_WINDOW_LOG`].
+///
+/// **Every** part of the encoder that needs to know how far back a match may
+/// reach must go through this function: the match finders that bound
+/// `dist <= params.window_size()`, `MatchState`'s retained history, and the
+/// frame header's `Window_Descriptor`. That is what keeps the window we declare
+/// and the window we use from drifting apart — the drift that produced streams
+/// C zstd rejected as corrupt (issue #9).
+pub(crate) fn encoder_params_for_level(level: i32, src_size: Option<u64>) -> CompressionParams {
+    let mut params = params_for_level(level, src_size);
+    if params.window_log > MAX_ENCODER_WINDOW_LOG {
+        params.window_log = MAX_ENCODER_WINDOW_LOG;
+    }
+    params
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +402,58 @@ mod tests {
                 "level {level} min_match={}",
                 p.min_match
             );
+        }
+    }
+
+    #[test]
+    fn encoder_params_cap_only_the_window_log() {
+        for level in 0..=MAX_CLEVEL {
+            for src_size in [
+                None,
+                Some(1_000),
+                Some(100_000),
+                Some(200_000),
+                Some(10_000_000),
+            ] {
+                let table = params_for_level(level, src_size);
+                let effective = encoder_params_for_level(level, src_size);
+                assert_eq!(
+                    effective.window_log,
+                    table.window_log.min(MAX_ENCODER_WINDOW_LOG),
+                    "level {level} src_size {src_size:?}"
+                );
+                // Nothing else may move: the caps exist to bound the *window*,
+                // not to change match finding or table sizes.
+                assert_eq!(
+                    CompressionParams {
+                        window_log: table.window_log,
+                        ..effective
+                    },
+                    table,
+                    "level {level} src_size {src_size:?}: a non-window field changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_window_never_exceeds_eight_mib() {
+        for level in 0..=MAX_CLEVEL {
+            assert!(
+                encoder_params_for_level(level, None).window_size() <= 8 * 1024 * 1024,
+                "level {level} would ask a decoder for more than 8 MiB"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_params_cap_bites_only_at_levels_20_to_22() {
+        // The default table's window_log reaches 25/26/27 at levels 20/21/22
+        // and stays at or below 23 everywhere else, so those three are the only
+        // levels the cap changes.
+        for level in 0..=MAX_CLEVEL {
+            let capped = encoder_params_for_level(level, None) != params_for_level(level, None);
+            assert_eq!(capped, level >= 20, "level {level}");
         }
     }
 

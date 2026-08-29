@@ -650,6 +650,15 @@ impl MatchState {
         &self.window
     }
 
+    /// The maximum history this state retains, in bytes — i.e. the furthest a
+    /// back-reference produced against it can reach.
+    ///
+    /// The frame header must declare at least this much (see
+    /// `frame_compressor::header_window_size`).
+    pub(crate) fn window_size(&self) -> usize {
+        self.window_size
+    }
+
     /// Get mutable reference to hash table.
     pub fn hash_table_mut(&mut self) -> &mut Vec<u32> {
         &mut self.hash_table

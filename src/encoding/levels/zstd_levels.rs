@@ -7,7 +7,7 @@ use crate::encoding::Matcher;
 use crate::encoding::block_header::BlockHeader;
 use crate::encoding::block_splitter;
 use crate::encoding::blocks::encode_compressed_block;
-use crate::encoding::compress_params::params_for_level;
+use crate::encoding::compress_params::encoder_params_for_level;
 use crate::encoding::frame_compressor::CompressState;
 use crate::encoding::zstd_match::{MatchState, compress_block_zstd};
 
@@ -53,11 +53,26 @@ pub fn compress_level<M: Matcher>(
         return;
     }
 
-    // Get compression parameters for this level
-    let params = params_for_level(level, src_size);
+    // Get compression parameters for this level. `encoder_params_for_level`,
+    // not `params_for_level`: the match finders bound `dist` by
+    // `params.window_size()`, and the frame header has already declared that
+    // exact number (see `frame_compressor::header_window_size`). Widening it
+    // here would let the encoder reach past the window the decoder was told to
+    // keep — issue #9.
+    let params = encoder_params_for_level(level, src_size);
 
     // Run the match finder, using cross-block state if available
     let compressed_block = if let Some(ms) = match_state {
+        // The header declared the window this `MatchState` was built with. If
+        // the search params disagree with it — e.g. a caller starts passing a
+        // `src_size` that selects a different table — the declaration is stale
+        // and we would be back to emitting offsets past the declared window.
+        debug_assert_eq!(
+            ms.window_size(),
+            params.window_size(),
+            "match window disagrees with the window the frame header declared \
+             (level {level}, src_size {src_size:?})"
+        );
         // On the first block, if dict_content is provided, seed the match state
         // window with dict content so cross-block history includes the dictionary.
         if ms.window().is_empty() {
