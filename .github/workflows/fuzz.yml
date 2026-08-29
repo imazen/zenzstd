@@ -84,10 +84,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build
+      # Hard gate. Until 2026-08-29 this step was wrapped in
+      #
+      #   if [ -d fuzz/regression ] && [ "$(ls fuzz/regression/ | wc -l)" -gt 0 ]; then … fi
+      #
+      # which silently skipped the whole suite whenever the corpus was missing
+      # or the checkout was partial — a self-skip invisible to the caller, and
+      # the exact shape the repo rules forbid. The exit status was already
+      # propagated (this repo never had the `|| echo` swallow), so a failing
+      # seed did go red; the hole was the skip. The harness asserts the corpus
+      # is present itself, which also made the guard redundant.
       - name: Regression seeds
-        run: |
-          if [ -d fuzz/regression ] && [ "$(ls fuzz/regression/ 2>/dev/null | wc -l)" -gt 0 ]; then
-            # fuzz_exports exposes the decoder Dictionary/scratch types the
-            # dict-roundtrip seeds need (matches the fuzz crate's feature set).
-            cargo test --features fuzz_exports --test fuzz_regression
-          fi
+        # fuzz_exports exposes the decoder Dictionary/scratch types the
+        # dict-roundtrip seeds need (matches the fuzz crate's feature set).
+        run: cargo test --features fuzz_exports --test fuzz_regression

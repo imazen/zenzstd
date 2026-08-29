@@ -177,11 +177,25 @@ fn fuzz_regression_seeds() {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        // Documentation is not a seed. Without this a corpus emptied down to a
+        // README.md would satisfy the count below and replay nothing.
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let lower = name.to_ascii_lowercase();
+            !name.starts_with('.') && !lower.ends_with(".md") && !lower.ends_with(".txt")
+        })
         .collect();
 
+    // A count, not just non-empty: raise MIN_SEEDS when seeds are added so a
+    // bulk delete that leaves one behind fails instead of quietly replaying a
+    // fraction of the corpus.
+    const MIN_SEEDS: usize = 1;
     assert!(
-        !entries.is_empty(),
-        "fuzz/regression/ is empty — at least one fixed-crash seed must be present"
+        entries.len() >= MIN_SEEDS,
+        "fuzz/regression/ holds {} replayable seeds, expected at least {MIN_SEEDS} — \
+         the committed fixed-crash seeds are missing or were renamed",
+        entries.len()
     );
 
     for entry in entries {
