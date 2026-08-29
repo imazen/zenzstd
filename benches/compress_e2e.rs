@@ -15,8 +15,13 @@ fn corpus(n: usize) -> Vec<u8> {
     let mut s = 0x9e37_79b9u32;
     let mut v = Vec::with_capacity(n);
     let words: Vec<&[u8]> = vec![
-        b"the quick brown fox ", b"jumps over ", b"lazy dog ", b"pack my box ",
-        b"with five dozen ", b"liquor jugs ", b"sphinx of black quartz ",
+        b"the quick brown fox ",
+        b"jumps over ",
+        b"lazy dog ",
+        b"pack my box ",
+        b"with five dozen ",
+        b"liquor jugs ",
+        b"sphinx of black quartz ",
     ];
     while v.len() < n {
         s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);

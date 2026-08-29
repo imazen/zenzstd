@@ -23,7 +23,9 @@ fn count_match_matches_the_plain_definition() {
 
     // Every shared-prefix length across and past the 8/16/32-byte block
     // boundaries, plus unequal slice lengths and empty inputs.
-    for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 200, 599] {
+    for len in [
+        0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 200, 599,
+    ] {
         for shared in 0..=len.min(70) {
             let a = &base[..len];
             let mut bv = base[..len].to_vec();
