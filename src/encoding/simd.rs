@@ -62,7 +62,10 @@ pub fn count_match(a: &[u8], b: &[u8]) -> usize {
 /// Scalar fallback for `incant!` dispatch. The `_token` parameter is required
 /// by the `incant!` macro convention (the `_scalar` suffix variant receives a
 /// `ScalarToken` as the first argument).
-#[cfg(feature = "simd")]
+///
+/// Gated the same way the `incant!` above is: aarch64 never reaches the
+/// dispatcher, so compiling this there would be dead code.
+#[cfg(all(feature = "simd", not(target_arch = "aarch64")))]
 #[inline]
 fn count_match_scalar(_token: archmage::ScalarToken, a: &[u8], b: &[u8]) -> usize {
     count_match_u64(a, b)
@@ -70,11 +73,15 @@ fn count_match_scalar(_token: archmage::ScalarToken, a: &[u8], b: &[u8]) -> usiz
 
 /// Generic u8x16 count_match: 16-byte vector XOR + bitmask to find first differing byte.
 ///
-/// Works on all platforms with u8x16 support (NEON, WASM128, SSE2). Processes
-/// 16 bytes per iteration, falling back to the u64 loop for the 0-15 byte tail.
-/// Must be `#[inline(always)]` so it inlines into callers, inheriting their
-/// target_feature context.
-#[cfg(all(feature = "simd", any(target_arch = "aarch64", target_arch = "wasm32")))]
+/// Processes 16 bytes per iteration, falling back to the u64 loop for the 0-15
+/// byte tail. Must be `#[inline(always)]` so it inlines into callers,
+/// inheriting their target_feature context.
+///
+/// The algorithm is backend-generic (any `U8x16Backend`: NEON, WASM128, SSE2),
+/// but wasm32 is the only target that still routes here — aarch64 takes the u64
+/// path for the reasons measured in `count_match` above. To reinstate NEON,
+/// widen this `cfg` and add back the one-line `NeonToken` adapter that calls it.
+#[cfg(all(feature = "simd", target_arch = "wasm32"))]
 #[inline(always)]
 fn count_match_generic<T: magetypes::simd::backends::U8x16Backend>(
     token: T,
@@ -104,13 +111,6 @@ fn count_match_generic<T: magetypes::simd::backends::U8x16Backend>(
 
     // Tail: u64 path then byte-by-byte
     offset + count_match_u64(&a[offset..], &b[offset..])
-}
-
-/// NEON count_match: real u8x16 SIMD via generic implementation.
-#[cfg(all(feature = "simd", target_arch = "aarch64"))]
-#[inline]
-fn count_match_neon(token: archmage::NeonToken, a: &[u8], b: &[u8]) -> usize {
-    count_match_generic(token, a, b)
 }
 
 /// WASM128 count_match: real u8x16 SIMD via generic implementation.
