@@ -63,32 +63,46 @@ zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 
 ## Known Issues
 
-### Frame header under-declares the window size — C zstd mis-decodes our output (#9)
-`frame_compressor.rs:171` writes the frame header's window size as
-`self.state.matcher.window_size()`, which is the `MatchGeneratorDriver`'s fixed
-**128 KiB** (`MatchGeneratorDriver::new(1024 * 128, 1)`). That is only correct
-for `CompressionLevel::Fastest`. Every other level matches through `MatchState`,
-whose window is `params_for_level(level, None).window_size() = 1 << window_log`
-— **512 KiB at L1, 1 MiB at L2, 2 MiB at L3-L8, 4 MiB at L9+**, up to
-`window_log 27` (128 MiB) at the top. So the encoder can emit a back-reference
-further than the header says the decoder needs to retain.
+### ~~Frame header under-declares the window size — C zstd mis-decodes our output~~ FIXED (#9)
+The frame header wrote `self.state.matcher.window_size()`, the
+`MatchGeneratorDriver`'s fixed **128 KiB**. That is only correct for
+`CompressionLevel::Fastest` and `Uncompressed`. Every other level matches
+through `MatchState`, whose window is
+`params_for_level(level, None).window_size() = 1 << window_log` — **512 KiB at
+L1, 1 MiB at L2, 2 MiB at L3-L8, 4 MiB at L9-L16, 8 MiB at L17-L19**, up to
+`window_log 27` (128 MiB) at L22. So the encoder emitted back-references further
+than the header said the decoder needed to retain.
 
-Our own decoder keeps more than the declared window and resolves those offsets
-anyway, which is exactly why every in-repo round-trip test passes. A
-spec-conformant decoder does not: C zstd sizes its window from the header,
-mis-resolves the far offsets, and reports `Restored data doesn't match checksum`
-(~500-800 KB) or `Data corruption detected` (~900 KB+).
+Our own decoder keeps more than the declared window and resolved those offsets
+anyway, which is exactly why every in-repo round-trip test passed. C zstd sizes
+its window from the header, mis-resolved the far offsets, and reported
+`Restored data doesn't match checksum` (~500-800 KB) or `Data corruption
+detected` (~900 KB+). Measured 2026-08-29: 112 of the 12,842 `byte_identity`
+cases, all at 1,000,000-byte inputs, at every level **except** `Fastest`.
 
-Measured 2026-08-29 with `cargo run --release --example byte_identity`: 112 of
-12,842 cases fail in C zstd while decoding fine here. All at 1,000,000-byte
-inputs, across seven content kinds, at every level **except** `Fastest` —
-`Fastest` has zero failures, which is the tell. Onset for the `text` kind is
-between 400,000 and 500,000 bytes.
+**Fix:** `compress_params::encoder_params_for_level` is the single source of
+truth for how far back a match may reach. `frame_compressor::header_window_size`
+(used by both the one-shot and the streaming encoder), `MatchState`'s retained
+history, and the match finders' `dist <= params.window_size()` bound all derive
+from it; `levels::zstd_levels::compress_level` debug-asserts the `MatchState`'s
+window equals the search params'. Post-fix: C-zstd-only failures **112 -> 0**,
+our own decoder's 458-case failure set unchanged, and 11,760 of 12,842 outputs
+moved by exactly one byte each — offset 5, the `Window_Descriptor`, with no
+length change anywhere. Regression: `tests/window_declaration.rs`.
 
-This is a data-corruption bug for anyone decoding our output with a conformant
-decoder, and it predates the 2026-08-29 clippy work (identical failure set at
-33a7b646). The fix is to derive the header window from whichever matcher will
-actually run, not unconditionally from the driver.
+`MAX_ENCODER_WINDOW_LOG = 23` caps the window at 8 MiB. Two reasons, both worth
+keeping in mind before raising it:
+- The format spec asks encoders not to require more than 8 MiB, since that is
+  the floor decoders are asked to support.
+- Declaring the uncapped `window_log 27` (128 MiB) at L22 makes **our own**
+  `FrameDecoder` reject the frame with `WindowSizeTooBig`. Note that limit is
+  asymmetric: `MAXIMUM_ALLOWED_WINDOW_SIZE` (100 MiB) is checked in
+  `FrameDecoderState::reset` but **not** in `FrameDecoderState::new`, so a fresh
+  decoder accepts a window a reused one refuses. Measured, not inferred.
+
+The cap only changes levels 20-22 (table window_logs 25/26/27) and only for
+inputs larger than 8 MiB; nothing in the test corpus reaches that, so no
+compressed payload byte moved.
 
 ### ~~Raw-dict roundtrip corruption at L13-15 (BtLazy2)~~ FIXED (#5)
 The BtLazy2 binary-tree match finder (levels 13-15 in the default param table)
@@ -160,7 +174,7 @@ correctly. This is a match finder bug, not an entropy coding issue.
 ## Commands
 
 ```
-cargo test                      # all tests (268 as of 2026-08-29)
+cargo test                      # all tests (271 lib + 6 integration as of 2026-08-29)
 cargo test --features simd      # with SIMD (simd is on by default)
 cargo bench --bench compress_compare              # benchmark
 cargo bench --bench compress_compare -- --save-baseline main
@@ -180,7 +194,12 @@ diff ~/tmp/{before,after}/cases.tsv                           # names the case t
 ```
 
 12,842 cases, ~35 s per run. If the sha256 moves and you did not intend it to,
-you changed the bitstream — find out why before committing. If you added a
-chunked loop, add a size or content kind that reaches its remainder path, then
-break that loop on purpose and confirm the case count moves; a harness that
-covers nothing reports success just as loudly as one that covers everything.
+you changed the bitstream — find out why before committing. The current
+reference is sha256 `45f69496…` over 256,991,165 blob bytes, with 458
+self-round-trip failures (all L16-22, the optimal-parser bug) and **0** cases
+that only C zstd rejects. That last number going nonzero means we are emitting
+streams a conformant decoder cannot read while ours accepts them, which is
+exactly how #9 hid. If you added a chunked loop, add a size or content kind that
+reaches its remainder path, then break that loop on purpose and confirm the case
+count moves; a harness that covers nothing reports success just as loudly as one
+that covers everything.

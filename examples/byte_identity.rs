@@ -33,16 +33,18 @@
 //! raw-dictionary encoder.
 //!
 //! Every output is also round-tripped through this crate's decoder and through
-//! the C zstd reference decoder, and both counts are printed. Two known bugs
-//! make some of those fail on a healthy tree, so read the counts, don't just
-//! read the exit code:
+//! the C zstd reference decoder, and both counts are printed. One known bug
+//! makes some of those fail on a healthy tree, so read the counts, don't just
+//! read the exit code: self round-trip at levels 16-22 fails because the
+//! BtOpt/BtUltra match finder is known-broken (see "L19+ decoding corruption"
+//! in CLAUDE.md). That is 458 of the 12,842 cases, and the C zstd decoder
+//! rejects the same 458 — it is corrupt output, not a disagreement.
 //!
-//!   * self round-trip at levels 16-22 — the BtOpt/BtUltra match finder is
-//!     known-broken (see "L19+ decoding corruption" in CLAUDE.md).
-//!   * C zstd round-trip on inputs over ~500 KB at every level except
-//!     `Fastest` — the frame header under-declares the window size, so a
-//!     spec-conformant decoder mis-resolves far offsets (issue #9). At the time
-//!     of writing that is 112 of the 12,842 cases.
+//! The count worth watching is the third one: cases the C decoder rejects that
+//! this crate's decoder accepts. Those are streams we are not entitled to
+//! produce and would never notice in-repo, because our decoder is lenient
+//! enough to hide them. It stood at 112 until the frame header stopped
+//! under-declaring the window size (issue #9); it must stay at 0.
 //!
 //! The run exits non-zero only when *this crate's own* encoder and decoder
 //! disagree at a level with no known bug, which is a self-consistency failure
@@ -366,7 +368,8 @@ fn main() {
     );
     println!(
         "roundtrip failures: C-zstd={} of which {} are cases zenzstd itself decodes fine \
-         (expected: 112, under-declared window on inputs >~500 KB, issue #9)",
+         (expected: 0 — a nonzero count means we emit streams only our own lenient \
+         decoder accepts, which is how issue #9 hid)",
         h.c_fail, h.c_only_fail
     );
     println!("wrote {out_dir}/cases.tsv and {out_dir}/all.bin");
