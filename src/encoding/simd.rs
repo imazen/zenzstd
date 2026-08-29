@@ -239,13 +239,12 @@ pub fn histogram(data: &[u8], counts: &mut [u32; 256]) {
     let mut c2 = [0u32; 256];
     let mut c3 = [0u32; 256];
 
-    let chunks = data.chunks_exact(4);
-    let remainder = chunks.remainder();
+    // `as_chunks::<4>()` hands back `&[u8; 4]` per chunk (no per-chunk
+    // `try_into`) plus the same 0-3 byte tail `chunks_exact(4).remainder()`
+    // produced. Fixed-size arrays keep the inner loop bounds-check free.
+    let (chunks, remainder) = data.as_chunks::<4>();
 
-    for chunk in chunks {
-        // Fixed-size indexing pattern: convert slice to array reference to
-        // eliminate bounds checks in the inner loop.
-        let b: &[u8; 4] = chunk.try_into().unwrap();
+    for b in chunks {
         c0[b[0] as usize] += 1;
         c1[b[1] as usize] += 1;
         c2[b[2] as usize] += 1;

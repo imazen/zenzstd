@@ -21,13 +21,12 @@ pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
         let mut v3 = seed;
         let mut v4 = seed.wrapping_sub(PRIME64_1);
 
-        // Process 32 bytes at a time. Use chunks_exact to get &[u8] slices
-        // that LLVM knows are exactly 32 bytes, then cast to &[u8; 32] once.
-        // All sub-array indexing on a [u8; 32] is compile-time provable in-bounds.
-        let chunks = data.chunks_exact(32);
-        let remainder = chunks.remainder();
-        for chunk in chunks {
-            let c: &[u8; 32] = chunk.try_into().unwrap();
+        // Process 32 bytes at a time. `as_chunks` yields `&[u8; 32]` directly,
+        // so no per-chunk `try_into` is needed and all sub-array indexing on a
+        // [u8; 32] is compile-time provable in-bounds. The `.1` tail holds the
+        // same 0-31 trailing bytes `chunks_exact(32).remainder()` did.
+        let (chunks, remainder) = data.as_chunks::<32>();
+        for c in chunks {
             // Sub-slicing a fixed array: LLVM proves [0..8] etc. are in-bounds at compile time
             v1 = round(v1, u64::from_le_bytes(read8(c, 0)));
             v2 = round(v2, u64::from_le_bytes(read8(c, 8)));
@@ -186,12 +185,11 @@ impl XxHash64 {
             }
         }
 
-        // Process 32-byte chunks via chunks_exact — one try_into per 32 bytes
+        // Process 32-byte chunks via as_chunks — `&[u8; 32]` with no try_into.
+        // `leftover` is the same 0-31 trailing bytes `.remainder()` gave.
         let tail = &data[offset..];
-        let chunks = tail.chunks_exact(32);
-        let leftover = chunks.remainder();
-        for chunk in chunks {
-            let c: &[u8; 32] = chunk.try_into().unwrap();
+        let (chunks, leftover) = tail.as_chunks::<32>();
+        for c in chunks {
             self.v1 = round(self.v1, u64::from_le_bytes(read8(c, 0)));
             self.v2 = round(self.v2, u64::from_le_bytes(read8(c, 8)));
             self.v3 = round(self.v3, u64::from_le_bytes(read8(c, 16)));

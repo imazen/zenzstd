@@ -313,7 +313,10 @@ impl MatchGenerator {
     /// Find the common prefix length between two byte slices with a configurable chunk length
     /// This enables vectorization optimizations
     fn mismatch_chunks<const N: usize>(xs: &[u8], ys: &[u8]) -> usize {
-        let off = core::iter::zip(xs.chunks_exact(N), ys.chunks_exact(N))
+        // `.0` is the complete-chunk prefix, exactly what `chunks_exact(N)`
+        // iterated; the dropped `.1` tails are covered by the byte-wise scan
+        // below, which restarts from `off` on the original slices.
+        let off = core::iter::zip(xs.as_chunks::<N>().0, ys.as_chunks::<N>().0)
             .take_while(|(x, y)| x == y)
             .count()
             * N;
