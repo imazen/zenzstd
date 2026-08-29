@@ -199,7 +199,7 @@ impl Harness {
             Ok(()) => Some("output differs from input".to_string()),
             Err(e) => Some(format!("{e:?}")),
         };
-        let ours_failed = ours.clone();
+        let we_decoded_it = ours.is_none();
         if let Some(what) = ours {
             self.rt_fail += 1;
             eprintln!("ROUNDTRIP zenzstd: {label}: {what}");
@@ -220,7 +220,7 @@ impl Harness {
             // A case only *we* decode is the interesting one: it means we
             // emitted something the reference decoder reads differently, which
             // our own decoder is lenient enough to hide.
-            if ours_failed.is_none() {
+            if we_decoded_it {
                 self.c_only_fail += 1;
             }
             eprintln!("ROUNDTRIP C zstd: {label}: {what}");
