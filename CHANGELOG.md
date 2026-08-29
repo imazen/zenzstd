@@ -40,7 +40,8 @@ breaking changes bump the minor version.
   inflating the binary corpus files with CRLF; `b2fdf39` had already recorded
   that ARM still failed with the gate in place. The `cfg` is left in place —
   removing it swaps one runtime dispatcher for another with no measured gain,
-  and the verification covered aarch64-apple-darwin only. Comment-only change.
+  and the verification covered aarch64-apple-darwin only. Comment-only change;
+  the remaining decision is tracked in #11 (`6a54b4d`).
 - README overhaul: corrected feature defaults (`simd` ships on by default), documented the experimental level 16-22 status and the 1 GiB decode-bomb output cap, added the standard badge row + MSRV badge, and split the crates.io README into `README.crates.md`.
 
 ### Fixed

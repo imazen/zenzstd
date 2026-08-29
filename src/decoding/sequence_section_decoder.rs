@@ -673,7 +673,7 @@ pub fn decode_and_execute_sequences(
         //    b2fdf39, 13 minutes after the gate, already recorded that ARM still
         //    failed with it in place and that the cause was "not SIMD related".
         //
-        // The gate is kept because removing it swaps autoversion's dispatcher for
+        // The gate is kept (see #11) because removing it swaps autoversion's dispatcher for
         // incant!'s token dispatch on ARM for no measured gain, and the testing
         // above covered aarch64-apple-darwin only, not windows-11-arm. The NEON
         // variant that does run is worth 1.9% here (3.7762 ms vs 3.8501 ms,

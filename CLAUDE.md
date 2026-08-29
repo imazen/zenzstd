@@ -98,7 +98,8 @@ keeping in mind before raising it:
   `FrameDecoder` reject the frame with `WindowSizeTooBig`. Note that limit is
   asymmetric: `MAXIMUM_ALLOWED_WINDOW_SIZE` (100 MiB) is checked in
   `FrameDecoderState::reset` but **not** in `FrameDecoderState::new`, so a fresh
-  decoder accepts a window a reused one refuses. Measured, not inferred.
+  decoder accepts a window a reused one refuses. Measured, not inferred;
+  tracked in #10.
 
 The cap only changes levels 20-22 (table window_logs 25/26/27) and only for
 inputs larger than 8 MiB; nothing in the test corpus reaches that, so no
@@ -184,6 +185,7 @@ correctly. This is a match finder bug, not an entropy coding issue.
     nothing measurable and the verification covered aarch64-apple-darwin, not
     windows-11-arm; the NEON variant that already runs is worth 1.9%
     (3.7762 ms vs 3.8501 ms on `benches/decode_all`, p < 0.05, M-series).
+    Remaining decision tracked in #11.
 - `unsafe-decompress` / `unsafe-compress` — opt-in unchecked indexing in hot
   paths. Off by default; the crate is `#![forbid(unsafe_code)]` without them.
 
