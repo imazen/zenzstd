@@ -26,6 +26,24 @@ breaking changes bump the minor version.
   the 8 MiB cap fails the table check at level 20.
 
 ### Changed
+- Refreshed `Cargo.lock` within the existing requirements, third-party only
+  (`ead29e2`). `magetypes` (0.9.26) and `zenbench` (0.1.8) were pinned back to
+  the versions the lock already held — they are zen-family crates whose
+  requirements are being re-governed elsewhere — and `archmage` was already at
+  its ceiling. Third-party movers: `cc` 1.2.64 → 1.4.4, `regex` 1.12.4 →
+  1.13.1, `rand` 0.10.1 → 0.10.2, `twox-hash` 2.1.2 → 2.1.4, `serde` 1.0.228 →
+  1.0.229, `libc` 0.2.186 → 0.2.189, `zerocopy` 0.8.52 → 0.8.56, `clap` 4.6.1 →
+  4.6.6, `chacha20` 0.10.0 → 0.10.2. Byte identity verified before and after:
+  12,842 cases, sha256 `45f69496…`, `cases.tsv` diff-clean, and the C-zstd
+  interop count that must stay at zero (streams only our own lenient decoder
+  accepts) is still zero. `zstd`/`zstd-safe`/`zstd-sys` did not move, so the
+  reference side of that gate is the same binary behaviour as before.
+- Bumped the `ruzstd` dev-dependency 0.8.2 → 0.9.0 (`73f1d31`). It is used in
+  exactly one place, `examples/compare.rs`, for a three-way decode-throughput
+  comparison; it is not linked into the library and cannot influence emitted
+  bytes. Compiles with no source change, and 0.9.0's `rust-version` of 1.87 is
+  below the crate's declared 1.89. Byte identity re-verified on this state as
+  well — same sha256, same zero interop count.
 - Corrected the `sequence_section_decoder` dispatch gate's comment and the
   matching CLAUDE.md entry. It claimed "NEON autoversion has a known decode
   correctness issue"; both halves are wrong. The `x86_64` `cfg` is only on the
