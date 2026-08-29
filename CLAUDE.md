@@ -138,10 +138,22 @@ correctly. This is a match finder bug, not an entropy coding issue.
 - `hash` — enables xxhash64 checksums in frames
 - `dict_builder` — dictionary training (from ruzstd)
 - `fuzz_exports` — exposes FSE/Huffman internals
-- `simd` — SIMD `count_match` via archmage/magetypes. AVX2 on x86_64, u8x16 on
-  wasm32. **aarch64 deliberately uses the scalar u64 path** — the NEON dispatch
-  was measured slower at the short match lengths that dominate (see the comment
-  in `encoding/simd.rs`), so the feature is a no-op for `count_match` there.
+- `simd` — archmage/magetypes acceleration in two places, both x86_64-centric:
+  - **encoder** `count_match` (`encoding/simd.rs`): AVX2 `u8x32` on x86_64,
+    `u8x16` on wasm32. **aarch64 deliberately uses the scalar u64 path** — the
+    NEON dispatch measured slower at the short match lengths that dominate, so
+    the feature is a no-op for `count_match` there (measurements in the comment
+    on `count_match`).
+  - **decoder** hot loops: `#[archmage::autoversion]` on
+    `fused_decode_execute_fast_inner` (`sequence_section_decoder.rs`) and the
+    Huffman bit extraction (`literals_section_decoder.rs`), for TZCNT / BMI2
+    PDEP-PEXT / wider copies. Both are reached only on x86_64 — the
+    `sequence_section_decoder` call site is `cfg(target_arch = "x86_64")` with a
+    comment claiming "NEON autoversion has a known decode correctness issue".
+    **That claim is unverified and untracked** — no test, issue, or changelog
+    entry backs it. Verify before relying on it either way; note the attribute
+    there is *not* arch-gated even though the call site is, unlike the
+    `literals_section_decoder` one which gates both.
 - `unsafe-decompress` / `unsafe-compress` — opt-in unchecked indexing in hot
   paths. Off by default; the crate is `#![forbid(unsafe_code)]` without them.
 
