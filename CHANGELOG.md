@@ -6,6 +6,17 @@ breaking changes bump the minor version.
 
 ## [Unreleased]
 
+### Added
+- `examples/byte_identity.rs` — a byte-identity harness for encoder refactors.
+  Compresses a 12,842-case grid (12 content kinds x 38 sizes x 27 levels, plus
+  the streaming encoder at five write chunkings and the raw-dictionary encoder),
+  writes a per-case `label/length/fnv1a64` TSV plus one concatenated blob to
+  sha256, and round-trips every output through both this decoder and the C zstd
+  reference decoder. Run it before and after a change to the encoder; identical
+  sha256 means not one emitted byte moved. This is the tool that produced the
+  evidence for the `as_chunks` rewrite below, and running it surfaced the
+  window-size bug noted under Known Issues.
+
 ### Changed
 - README overhaul: corrected feature defaults (`simd` ships on by default), documented the experimental level 16-22 status and the 1 GiB decode-bomb output cap, added the standard badge row + MSRV badge, and split the crates.io README into `README.crates.md`.
 
@@ -56,3 +67,12 @@ breaking changes bump the minor version.
   the leading loops of `ZSTD_DUBT_findBestMatch`) into the binary-tree finder.
   Regression-gated by `dict_roundtrip_{l15,all_levels}_issue5` and the
   `fuzz/regression/dict_roundtrip_l15_issue5` seed. (#5)
+
+## Known issues
+
+- The frame header under-declares the window size for every compression level
+  except `Fastest`, so a spec-conformant decoder (C zstd) mis-decodes our output
+  once an input exceeds roughly 500 KB. Our own decoder is lenient enough to hide
+  it. Details and measurements in CLAUDE.md; tracked as issue #9.
+- Levels 16-22 (BtOpt/BtUltra optimal parsing) produce output that fails to
+  round-trip on some content. Details in CLAUDE.md.

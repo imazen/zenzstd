@@ -63,6 +63,33 @@ zenzstd 5.54 GiB/s vs C 5.66 GiB/s (2% gap)
 
 ## Known Issues
 
+### Frame header under-declares the window size — C zstd mis-decodes our output (#9)
+`frame_compressor.rs:171` writes the frame header's window size as
+`self.state.matcher.window_size()`, which is the `MatchGeneratorDriver`'s fixed
+**128 KiB** (`MatchGeneratorDriver::new(1024 * 128, 1)`). That is only correct
+for `CompressionLevel::Fastest`. Every other level matches through `MatchState`,
+whose window is `params_for_level(level, None).window_size() = 1 << window_log`
+— **512 KiB at L1, 1 MiB at L2, 2 MiB at L3-L8, 4 MiB at L9+**, up to
+`window_log 27` (128 MiB) at the top. So the encoder can emit a back-reference
+further than the header says the decoder needs to retain.
+
+Our own decoder keeps more than the declared window and resolves those offsets
+anyway, which is exactly why every in-repo round-trip test passes. A
+spec-conformant decoder does not: C zstd sizes its window from the header,
+mis-resolves the far offsets, and reports `Restored data doesn't match checksum`
+(~500-800 KB) or `Data corruption detected` (~900 KB+).
+
+Measured 2026-08-29 with `cargo run --release --example byte_identity`: 112 of
+12,842 cases fail in C zstd while decoding fine here. All at 1,000,000-byte
+inputs, across seven content kinds, at every level **except** `Fastest` —
+`Fastest` has zero failures, which is the tell. Onset for the `text` kind is
+between 400,000 and 500,000 bytes.
+
+This is a data-corruption bug for anyone decoding our output with a conformant
+decoder, and it predates the 2026-08-29 clippy work (identical failure set at
+33a7b646). The fix is to derive the header window from whichever matcher will
+actually run, not unconditionally from the driver.
+
 ### ~~Raw-dict roundtrip corruption at L13-15 (BtLazy2)~~ FIXED (#5)
 The BtLazy2 binary-tree match finder (levels 13-15 in the default param table)
 produced a single corrupted byte when compressing with a raw dictionary: a
