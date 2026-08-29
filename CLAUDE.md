@@ -143,9 +143,27 @@ correctly. This is a match finder bug, not an entropy coding issue.
 ## Commands
 
 ```
-cargo test                      # all tests (209)
-cargo test --features simd      # with SIMD
+cargo test                      # all tests (268 as of 2026-08-29)
+cargo test --features simd      # with SIMD (simd is on by default)
 cargo bench --bench compress_compare              # benchmark
 cargo bench --bench compress_compare -- --save-baseline main
 cargo bench --bench compress_compare -- --baseline main --max-regression 5
 ```
+
+### Before and after ANY change to the encoder
+
+Round-trip tests cannot catch a change in emitted bytes: the encoder and decoder
+just agree with each other on the new output. Hash it instead.
+
+```
+cargo run --release --example byte_identity -- ~/tmp/before   # on the base commit
+cargo run --release --example byte_identity -- ~/tmp/after    # with your change
+shasum -a 256 ~/tmp/{before,after}/all.bin                    # must match
+diff ~/tmp/{before,after}/cases.tsv                           # names the case that moved
+```
+
+12,842 cases, ~35 s per run. If the sha256 moves and you did not intend it to,
+you changed the bitstream — find out why before committing. If you added a
+chunked loop, add a size or content kind that reaches its remainder path, then
+break that loop on purpose and confirm the case count moves; a harness that
+covers nothing reports success just as loudly as one that covers everything.
