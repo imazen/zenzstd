@@ -26,6 +26,21 @@ breaking changes bump the minor version.
   the 8 MiB cap fails the table check at level 20.
 
 ### Changed
+- Corrected the `sequence_section_decoder` dispatch gate's comment and the
+  matching CLAUDE.md entry. It claimed "NEON autoversion has a known decode
+  correctness issue"; both halves are wrong. The `x86_64` `cfg` is only on the
+  `incant!` call site — `#[autoversion]` on `fused_decode_execute_fast_inner` is
+  not arch-gated, so aarch64 has been running
+  `___arcane_fused_decode_execute_fast_inner_neon` all along (confirmed in the
+  emitted LLVM IR). And there is no divergence to gate against: arch-gating the
+  attribute too, so aarch64 genuinely decodes scalar, gives byte-for-byte
+  identical results across the full suite, the 101-file decode corpus and all
+  12,842 `byte_identity` frames. The windows-arm symptom that prompted the gate
+  in `4602a83` was root-caused two commits later, in `7d16d87`/`be8af63`, to git
+  inflating the binary corpus files with CRLF; `b2fdf39` had already recorded
+  that ARM still failed with the gate in place. The `cfg` is left in place —
+  removing it swaps one runtime dispatcher for another with no measured gain,
+  and the verification covered aarch64-apple-darwin only. Comment-only change.
 - README overhaul: corrected feature defaults (`simd` ships on by default), documented the experimental level 16-22 status and the 1 GiB decode-bomb output cap, added the standard badge row + MSRV badge, and split the crates.io README into `README.crates.md`.
 
 ### Fixed

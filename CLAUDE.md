@@ -161,13 +161,29 @@ correctly. This is a match finder bug, not an entropy coding issue.
   - **decoder** hot loops: `#[archmage::autoversion]` on
     `fused_decode_execute_fast_inner` (`sequence_section_decoder.rs`) and the
     Huffman bit extraction (`literals_section_decoder.rs`), for TZCNT / BMI2
-    PDEP-PEXT / wider copies. Both are reached only on x86_64 — the
-    `sequence_section_decoder` call site is `cfg(target_arch = "x86_64")` with a
-    comment claiming "NEON autoversion has a known decode correctness issue".
-    **That claim is unverified and untracked** — no test, issue, or changelog
-    entry backs it. Verify before relying on it either way; note the attribute
-    there is *not* arch-gated even though the call site is, unlike the
-    `literals_section_decoder` one which gates both.
+    PDEP-PEXT / wider copies. The two are **not gated alike**, and the
+    difference is load-bearing:
+    - `literals_section_decoder` gates the attribute *and* the call site to
+      x86_64, so aarch64 has no `decode_huffman_stream_neon` at all.
+    - `sequence_section_decoder` gates only the `incant!` call site. Its
+      `#[autoversion]` attribute is not arch-gated, so on aarch64 the
+      non-x86 arm calls the autoversion dispatcher, which **does** run
+      `___arcane_fused_decode_execute_fast_inner_neon`. Verified in the emitted
+      LLVM IR, 2026-08-29.
+    That call site's comment claiming "NEON autoversion has a known decode
+    correctness issue" (from `4602a83`) is **wrong on both halves** and should
+    not be repeated. The gate does not keep NEON out (above), and no NEON
+    divergence exists: arch-gating the attribute as well, so aarch64 truly
+    decodes scalar, produces byte-for-byte identical results across the full
+    suite, the 101-file decode corpus and all 12,842 `byte_identity` frames.
+    The original windows-arm symptom ("output truncated by small amounts") was
+    root-caused two commits later, in `7d16d87`/`be8af63`, to git inflating the
+    binary corpus files with CRLF — `b2fdf39`, 13 minutes after the gate, had
+    already recorded that ARM still failed with the gate in place and that the
+    cause was "not SIMD related". The gate is kept only because removing it buys
+    nothing measurable and the verification covered aarch64-apple-darwin, not
+    windows-11-arm; the NEON variant that already runs is worth 1.9%
+    (3.7762 ms vs 3.8501 ms on `benches/decode_all`, p < 0.05, M-series).
 - `unsafe-decompress` / `unsafe-compress` — opt-in unchecked indexing in hot
   paths. Off by default; the crate is `#![forbid(unsafe_code)]` without them.
 

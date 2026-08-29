@@ -651,8 +651,33 @@ pub fn decode_and_execute_sequences(
         // When `simd` feature is enabled, dispatch to the best available ISA variant
         // via incant!. This compiles the fused loop with target_feature=+avx2,+bmi2
         // on supporting CPUs, giving LLVM access to TZCNT, PDEP/PEXT, and wider copies.
-        // Only use archmage dispatch on x86_64 where the V3 (AVX2+BMI2) variant
-        // is well-tested. NEON autoversion has a known decode correctness issue.
+        //
+        // The `x86_64` gate arrived in 4602a83 claiming "NEON autoversion has a
+        // known decode correctness issue". Do not read it that way — verified
+        // 2026-08-29 on aarch64-apple-darwin, all three parts:
+        //
+        //  * The gate does not keep NEON out. `#[autoversion]` on
+        //    `fused_decode_execute_fast_inner` below is *not* arch-gated, so on
+        //    aarch64 the `#[cfg(not(...))]` arm calls the autoversion dispatcher,
+        //    which selects the NEON variant at runtime. The emitted LLVM IR
+        //    contains `___arcane_fused_decode_execute_fast_inner_neon` either way.
+        //    (`literals_section_decoder` gates both, and genuinely has no NEON
+        //    variant on aarch64 — the two decoders are not gated alike.)
+        //  * There is no observed NEON decode divergence. Arch-gating the
+        //    attribute too, so aarch64 really does decode scalar, gives byte-for-
+        //    byte identical results across the whole suite, the 101-file decode
+        //    corpus, and all 12,842 `examples/byte_identity` frames.
+        //  * The symptom that prompted the gate ("output truncated by small
+        //    amounts" on windows-arm) was root-caused two commits later, in
+        //    7d16d87/be8af63, to git inflating the binary corpus files with CRLF.
+        //    b2fdf39, 13 minutes after the gate, already recorded that ARM still
+        //    failed with it in place and that the cause was "not SIMD related".
+        //
+        // The gate is kept because removing it swaps autoversion's dispatcher for
+        // incant!'s token dispatch on ARM for no measured gain, and the testing
+        // above covered aarch64-apple-darwin only, not windows-11-arm. The NEON
+        // variant that does run is worth 1.9% here (3.7762 ms vs 3.8501 ms,
+        // `benches/decode_all`, p < 0.05).
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
             archmage::incant!(fused_decode_execute_fast_inner(
@@ -686,8 +711,13 @@ pub fn decode_and_execute_sequences(
 ///
 /// Hot state (pos, total_output_counter, offset history) is hoisted to stack locals.
 /// When the `simd` feature is enabled, `#[autoversion]` generates per-ISA variants
-/// (scalar, SSE4.2, AVX2+BMI2) so the compiler can use TZCNT, BMI2 bit extraction,
-/// and wider memory operations in the hot loop.
+/// (scalar, SSE4.2, AVX2+BMI2, NEON) so the compiler can use TZCNT, BMI2 bit
+/// extraction, and wider memory operations in the hot loop.
+///
+/// Note this attribute is deliberately *not* arch-gated, unlike the `incant!` at
+/// the call site: on aarch64 this name is the autoversion dispatcher and it does
+/// run the NEON variant. See the long comment at that call site for why the two
+/// disagree and what was verified about it.
 #[cfg_attr(feature = "simd", archmage::autoversion)]
 #[cfg_attr(not(feature = "simd"), inline(always))]
 #[allow(dead_code)] // autoversion generates the actual called variants
