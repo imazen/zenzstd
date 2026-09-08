@@ -1,0 +1,17 @@
+# CI-free public-API snapshot runner — the only package depending on
+# zenutils-apidoc. The empty [workspace] table detaches it from the parent
+# package, so plain `cargo test` and every CI job never compile the apidoc
+# tree or run rustdoc. Regenerate via `just api-doc`.
+[package]
+name = "zenzstd-apidoc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# TODO: switch to a registry version once zenutils-apidoc 0.1.2 is published.
+# 0.1.1 predates architecture partitioning and would bake this machine's
+# arch-specific surface into the portable body.
+zenutils-apidoc = { git = "https://github.com/imazen/zenutils" }

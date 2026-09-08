@@ -30,3 +30,7 @@ copter-report/
 Cargo.toml.original.txt
 *.rs.local
 .workongoing
+
+# apidoc/ snapshot-runner package: commit its lockfile, ignore its target
+!apidoc/Cargo.lock
+apidoc/target/

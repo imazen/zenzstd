@@ -10,6 +10,8 @@ keywords = ["zstd", "zstandard", "compression", "decompression", "no_std"]
 categories = ["compression", "no-std"]
 readme = "README.crates.md"
 exclude = [
+    "docs/",
+    "apidoc/",
     "vendor/",
     "decodecorpus_files/",
     "fuzz/",

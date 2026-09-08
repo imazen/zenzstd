@@ -1,0 +1,457 @@
+# zenzstd public API — supported surface (default features)
+# (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
+# Encodings: crate-name prefix stripped; auto traits collapse to a
+# count + exceptions; trait impls collapse to one roster line per
+# type (method signatures live at the trait definition); blanket
+# impls omitted; re-export duplicates annotated `[also: path]`.
+# DO NOT EDIT BY HAND — commit regenerated changes with the code.
+#
+# files: zenzstd.txt 416 lines (supported surface) | zenzstd.features.txt 112 added (features: dict_builder,fuzz_exports,hash,simd,std,unsafe-compress,unsafe-decompress) | zenzstd.internal.txt 13 lines (13 hidden + 0 excluded-feature)
+# arch-unique surface: (none — portable on every target)
+
+## summary
+#
+#   pub modules                                 9
+#   pub types (struct/enum/trait/alias)        38
+#   pub consts/statics                          1
+#   free functions                             15
+#   inherent methods                           93
+#   struct fields                              85
+#   enum variants                             126
+#   re-exports                                  8
+#   trait roster entries (type × trait)       122
+#   auto-trait-complete types                  27
+#   auto-trait exceptions                       8
+#
+# per-module pub lines:
+#   (root)                            6
+#   decoding                        234
+#   encoding                        116
+#   io                                4
+#   io_std                            4
+#   stream                           11
+
+## items (375 lines)
+
+pub mod zenzstd
+pub mod decoding
+pub mod decoding::errors
+#[non_exhaustive] pub enum decoding::errors::BlockHeaderReadError
+pub decoding::errors::BlockHeaderReadError::BlockSizeError(decoding::errors::BlockSizeError)
+pub decoding::errors::BlockHeaderReadError::BlockTypeError(decoding::errors::BlockTypeError)
+pub decoding::errors::BlockHeaderReadError::FoundReservedBlock
+pub decoding::errors::BlockHeaderReadError::ReadError(core::io::error::Error)
+#[non_exhaustive] pub enum decoding::errors::BlockSizeError
+pub decoding::errors::BlockSizeError::BlockSizeTooLarge
+pub decoding::errors::BlockSizeError::BlockSizeTooLarge::size: u32
+#[non_exhaustive] pub enum decoding::errors::BlockTypeError
+pub decoding::errors::BlockTypeError::InvalidBlocktypeNumber
+pub decoding::errors::BlockTypeError::InvalidBlocktypeNumber::num: u8
+#[non_exhaustive] pub enum decoding::errors::DecodeBlockContentError
+pub decoding::errors::DecodeBlockContentError::DecoderStateIsFailed
+pub decoding::errors::DecodeBlockContentError::DecompressBlockError(decoding::errors::DecompressBlockError)
+pub decoding::errors::DecodeBlockContentError::ExpectedHeaderOfPreviousBlock
+pub decoding::errors::DecodeBlockContentError::ReadError
+pub decoding::errors::DecodeBlockContentError::ReadError::source: core::io::error::Error
+pub decoding::errors::DecodeBlockContentError::ReadError::step: blocks::block::BlockType
+#[non_exhaustive] pub enum decoding::errors::DecodeBufferError
+pub decoding::errors::DecodeBufferError::NotEnoughBytesInDictionary
+pub decoding::errors::DecodeBufferError::NotEnoughBytesInDictionary::got: usize
+pub decoding::errors::DecodeBufferError::NotEnoughBytesInDictionary::need: usize
+pub decoding::errors::DecodeBufferError::OffsetTooBig
+pub decoding::errors::DecodeBufferError::OffsetTooBig::buf_len: usize
+pub decoding::errors::DecodeBufferError::OffsetTooBig::offset: usize
+#[non_exhaustive] pub enum decoding::errors::DecodeSequenceError
+pub decoding::errors::DecodeSequenceError::ExtraBits
+pub decoding::errors::DecodeSequenceError::ExtraBits::bits_remaining: isize
+pub decoding::errors::DecodeSequenceError::ExtraPadding
+pub decoding::errors::DecodeSequenceError::ExtraPadding::skipped_bits: i32
+pub decoding::errors::DecodeSequenceError::FSEDecoderError(decoding::errors::FSEDecoderError)
+pub decoding::errors::DecodeSequenceError::FSETableError(decoding::errors::FSETableError)
+pub decoding::errors::DecodeSequenceError::GetBitsError(bit_io::bit_reader::GetBitsError)
+pub decoding::errors::DecodeSequenceError::MissingByteForRleLlTable
+pub decoding::errors::DecodeSequenceError::MissingByteForRleMlTable
+pub decoding::errors::DecodeSequenceError::MissingByteForRleOfTable
+pub decoding::errors::DecodeSequenceError::MissingCompressionMode
+pub decoding::errors::DecodeSequenceError::NotEnoughBytesForNumSequences
+pub decoding::errors::DecodeSequenceError::UnsupportedOffset
+pub decoding::errors::DecodeSequenceError::UnsupportedOffset::offset_code: u8
+pub decoding::errors::DecodeSequenceError::ZeroOffset
+#[non_exhaustive] pub enum decoding::errors::DecompressBlockError
+pub decoding::errors::DecompressBlockError::BlockContentReadError(core::io::error::Error)
+pub decoding::errors::DecompressBlockError::DecodeSequenceError(decoding::errors::DecodeSequenceError)
+pub decoding::errors::DecompressBlockError::DecompressLiteralsError(decoding::errors::DecompressLiteralsError)
+pub decoding::errors::DecompressBlockError::ExecuteSequencesError(decoding::errors::ExecuteSequencesError)
+pub decoding::errors::DecompressBlockError::LiteralsSectionParseError(decoding::errors::LiteralsSectionParseError)
+pub decoding::errors::DecompressBlockError::MalformedSectionHeader
+pub decoding::errors::DecompressBlockError::MalformedSectionHeader::expected_len: usize
+pub decoding::errors::DecompressBlockError::MalformedSectionHeader::remaining_bytes: usize
+pub decoding::errors::DecompressBlockError::SequencesHeaderParseError(decoding::errors::SequencesHeaderParseError)
+#[non_exhaustive] pub enum decoding::errors::DecompressLiteralsError
+pub decoding::errors::DecompressLiteralsError::BitstreamReadMismatch
+pub decoding::errors::DecompressLiteralsError::BitstreamReadMismatch::expected: isize
+pub decoding::errors::DecompressLiteralsError::BitstreamReadMismatch::read_til: isize
+pub decoding::errors::DecompressLiteralsError::DecodedLiteralCountMismatch
+pub decoding::errors::DecompressLiteralsError::DecodedLiteralCountMismatch::decoded: usize
+pub decoding::errors::DecompressLiteralsError::DecodedLiteralCountMismatch::expected: usize
+pub decoding::errors::DecompressLiteralsError::ExtraPadding
+pub decoding::errors::DecompressLiteralsError::ExtraPadding::skipped_bits: i32
+pub decoding::errors::DecompressLiteralsError::GetBitsError(bit_io::bit_reader::GetBitsError)
+pub decoding::errors::DecompressLiteralsError::HuffmanDecoderError(decoding::errors::HuffmanDecoderError)
+pub decoding::errors::DecompressLiteralsError::HuffmanTableError(decoding::errors::HuffmanTableError)
+pub decoding::errors::DecompressLiteralsError::MissingBytesForJumpHeader
+pub decoding::errors::DecompressLiteralsError::MissingBytesForJumpHeader::got: usize
+pub decoding::errors::DecompressLiteralsError::MissingBytesForLiterals
+pub decoding::errors::DecompressLiteralsError::MissingBytesForLiterals::got: usize
+pub decoding::errors::DecompressLiteralsError::MissingBytesForLiterals::needed: usize
+pub decoding::errors::DecompressLiteralsError::MissingCompressedSize
+pub decoding::errors::DecompressLiteralsError::MissingNumStreams
+pub decoding::errors::DecompressLiteralsError::UninitializedHuffmanTable
+#[non_exhaustive] pub enum decoding::errors::DictionaryDecodeError
+pub decoding::errors::DictionaryDecodeError::BadMagicNum
+pub decoding::errors::DictionaryDecodeError::BadMagicNum::got: [u8; 4]
+pub decoding::errors::DictionaryDecodeError::DictionaryTooShort
+pub decoding::errors::DictionaryDecodeError::DictionaryTooShort::got: usize
+pub decoding::errors::DictionaryDecodeError::DictionaryTooShort::need: usize
+pub decoding::errors::DictionaryDecodeError::FSETableError(decoding::errors::FSETableError)
+pub decoding::errors::DictionaryDecodeError::HuffmanTableError(decoding::errors::HuffmanTableError)
+pub decoding::errors::DictionaryDecodeError::MissingOffsetHistory
+pub decoding::errors::DictionaryDecodeError::MissingOffsetHistory::got: usize
+#[non_exhaustive] pub enum decoding::errors::ExecuteSequencesError
+pub decoding::errors::ExecuteSequencesError::BlockContentTooLarge
+pub decoding::errors::ExecuteSequencesError::DecodebufferError(decoding::errors::DecodeBufferError)
+pub decoding::errors::ExecuteSequencesError::NotEnoughBytesForSequence
+pub decoding::errors::ExecuteSequencesError::NotEnoughBytesForSequence::have: usize
+pub decoding::errors::ExecuteSequencesError::NotEnoughBytesForSequence::wanted: usize
+pub decoding::errors::ExecuteSequencesError::ZeroOffset
+#[non_exhaustive] pub enum decoding::errors::FSEDecoderError
+pub decoding::errors::FSEDecoderError::GetBitsError(bit_io::bit_reader::GetBitsError)
+pub decoding::errors::FSEDecoderError::TableIsUninitialized
+#[non_exhaustive] pub enum decoding::errors::FSETableError
+pub decoding::errors::FSETableError::AccLogIsZero
+pub decoding::errors::FSETableError::AccLogTooBig
+pub decoding::errors::FSETableError::AccLogTooBig::got: u8
+pub decoding::errors::FSETableError::AccLogTooBig::max: u8
+pub decoding::errors::FSETableError::GetBitsError(bit_io::bit_reader::GetBitsError)
+pub decoding::errors::FSETableError::ProbabilityCounterMismatch
+pub decoding::errors::FSETableError::ProbabilityCounterMismatch::expected_sum: u32
+pub decoding::errors::FSETableError::ProbabilityCounterMismatch::got: u32
+pub decoding::errors::FSETableError::ProbabilityCounterMismatch::symbol_probabilities: alloc::vec::Vec<i32>
+pub decoding::errors::FSETableError::TooManySymbols
+pub decoding::errors::FSETableError::TooManySymbols::got: usize
+#[non_exhaustive] pub enum decoding::errors::FrameDecoderError
+pub decoding::errors::FrameDecoderError::DictNotProvided
+pub decoding::errors::FrameDecoderError::DictNotProvided::dict_id: u32
+pub decoding::errors::FrameDecoderError::DictionaryDecodeError(decoding::errors::DictionaryDecodeError)
+pub decoding::errors::FrameDecoderError::FailedToDrainDecodebuffer(core::io::error::Error)
+pub decoding::errors::FrameDecoderError::FailedToInitialize(decoding::errors::FrameHeaderError)
+pub decoding::errors::FrameDecoderError::FailedToReadBlockBody(decoding::errors::DecodeBlockContentError)
+pub decoding::errors::FrameDecoderError::FailedToReadBlockHeader(decoding::errors::BlockHeaderReadError)
+pub decoding::errors::FrameDecoderError::FailedToReadChecksum(core::io::error::Error)
+pub decoding::errors::FrameDecoderError::FailedToSkipFrame
+pub decoding::errors::FrameDecoderError::FrameHeaderError(decoding::errors::FrameHeaderError)
+pub decoding::errors::FrameDecoderError::NotYetInitialized
+pub decoding::errors::FrameDecoderError::ReadFrameHeaderError(decoding::errors::ReadFrameHeaderError)
+pub decoding::errors::FrameDecoderError::TargetTooSmall
+pub decoding::errors::FrameDecoderError::WindowSizeTooBig
+pub decoding::errors::FrameDecoderError::WindowSizeTooBig::requested: u64
+#[non_exhaustive] pub enum decoding::errors::FrameDescriptorError
+pub decoding::errors::FrameDescriptorError::InvalidFrameContentSizeFlag
+pub decoding::errors::FrameDescriptorError::InvalidFrameContentSizeFlag::got: u8
+#[non_exhaustive] pub enum decoding::errors::FrameHeaderError
+pub decoding::errors::FrameHeaderError::DictIdTooSmall
+pub decoding::errors::FrameHeaderError::DictIdTooSmall::expected: usize
+pub decoding::errors::FrameHeaderError::DictIdTooSmall::got: usize
+pub decoding::errors::FrameHeaderError::FrameDescriptorError(decoding::errors::FrameDescriptorError)
+pub decoding::errors::FrameHeaderError::FrameSizeIsZero
+pub decoding::errors::FrameHeaderError::InvalidFrameSize
+pub decoding::errors::FrameHeaderError::InvalidFrameSize::got: u8
+pub decoding::errors::FrameHeaderError::MismatchedFrameSize
+pub decoding::errors::FrameHeaderError::MismatchedFrameSize::expected: u8
+pub decoding::errors::FrameHeaderError::MismatchedFrameSize::got: usize
+pub decoding::errors::FrameHeaderError::WindowTooBig
+pub decoding::errors::FrameHeaderError::WindowTooBig::got: u64
+pub decoding::errors::FrameHeaderError::WindowTooSmall
+pub decoding::errors::FrameHeaderError::WindowTooSmall::got: u64
+#[non_exhaustive] pub enum decoding::errors::HuffmanDecoderError
+pub decoding::errors::HuffmanDecoderError::GetBitsError(bit_io::bit_reader::GetBitsError)
+#[non_exhaustive] pub enum decoding::errors::HuffmanTableError
+pub decoding::errors::HuffmanTableError::ExtraPadding
+pub decoding::errors::HuffmanTableError::ExtraPadding::skipped_bits: i32
+pub decoding::errors::HuffmanTableError::FSEDecoderError(decoding::errors::FSEDecoderError)
+pub decoding::errors::HuffmanTableError::FSETableError(decoding::errors::FSETableError)
+pub decoding::errors::HuffmanTableError::FSETableUsedTooManyBytes
+pub decoding::errors::HuffmanTableError::FSETableUsedTooManyBytes::available_bytes: u8
+pub decoding::errors::HuffmanTableError::FSETableUsedTooManyBytes::used: usize
+pub decoding::errors::HuffmanTableError::GetBitsError(bit_io::bit_reader::GetBitsError)
+pub decoding::errors::HuffmanTableError::LeftoverIsNotAPowerOf2
+pub decoding::errors::HuffmanTableError::LeftoverIsNotAPowerOf2::got: u32
+pub decoding::errors::HuffmanTableError::MaxBitsTooHigh
+pub decoding::errors::HuffmanTableError::MaxBitsTooHigh::got: u8
+pub decoding::errors::HuffmanTableError::MissingWeights
+pub decoding::errors::HuffmanTableError::NotEnoughBytesForWeights
+pub decoding::errors::HuffmanTableError::NotEnoughBytesForWeights::expected_bytes: u8
+pub decoding::errors::HuffmanTableError::NotEnoughBytesForWeights::got_bytes: usize
+pub decoding::errors::HuffmanTableError::NotEnoughBytesInSource
+pub decoding::errors::HuffmanTableError::NotEnoughBytesInSource::got: usize
+pub decoding::errors::HuffmanTableError::NotEnoughBytesInSource::need: usize
+pub decoding::errors::HuffmanTableError::NotEnoughBytesToDecompressWeights
+pub decoding::errors::HuffmanTableError::NotEnoughBytesToDecompressWeights::have: usize
+pub decoding::errors::HuffmanTableError::NotEnoughBytesToDecompressWeights::need: usize
+pub decoding::errors::HuffmanTableError::SourceIsEmpty
+pub decoding::errors::HuffmanTableError::TooManyWeights
+pub decoding::errors::HuffmanTableError::TooManyWeights::got: usize
+pub decoding::errors::HuffmanTableError::WeightBiggerThanMaxNumBits
+pub decoding::errors::HuffmanTableError::WeightBiggerThanMaxNumBits::got: u8
+#[non_exhaustive] pub enum decoding::errors::LiteralsSectionParseError
+pub decoding::errors::LiteralsSectionParseError::GetBitsError(bit_io::bit_reader::GetBitsError)
+pub decoding::errors::LiteralsSectionParseError::IllegalLiteralSectionType
+pub decoding::errors::LiteralsSectionParseError::IllegalLiteralSectionType::got: u8
+pub decoding::errors::LiteralsSectionParseError::NotEnoughBytes
+pub decoding::errors::LiteralsSectionParseError::NotEnoughBytes::have: usize
+pub decoding::errors::LiteralsSectionParseError::NotEnoughBytes::need: u8
+#[non_exhaustive] pub enum decoding::errors::ReadFrameHeaderError
+pub decoding::errors::ReadFrameHeaderError::BadMagicNumber(u32)
+pub decoding::errors::ReadFrameHeaderError::DictionaryIdReadError(core::io::error::Error)
+pub decoding::errors::ReadFrameHeaderError::FrameContentSizeReadError(core::io::error::Error)
+pub decoding::errors::ReadFrameHeaderError::FrameDescriptorReadError(core::io::error::Error)
+pub decoding::errors::ReadFrameHeaderError::InvalidFrameDescriptor(decoding::errors::FrameDescriptorError)
+pub decoding::errors::ReadFrameHeaderError::MagicNumberReadError(core::io::error::Error)
+pub decoding::errors::ReadFrameHeaderError::SkipFrame
+pub decoding::errors::ReadFrameHeaderError::SkipFrame::length: u32
+pub decoding::errors::ReadFrameHeaderError::SkipFrame::magic_number: u32
+pub decoding::errors::ReadFrameHeaderError::WindowDescriptorReadError(core::io::error::Error)
+#[non_exhaustive] pub enum decoding::errors::SequencesHeaderParseError
+pub decoding::errors::SequencesHeaderParseError::NotEnoughBytes
+pub decoding::errors::SequencesHeaderParseError::NotEnoughBytes::got: usize
+pub decoding::errors::SequencesHeaderParseError::NotEnoughBytes::need_at_least: u8
+pub enum decoding::BlockDecodingStrategy
+pub decoding::BlockDecodingStrategy::All
+pub decoding::BlockDecodingStrategy::UptoBlocks(usize)
+pub decoding::BlockDecodingStrategy::UptoBytes(usize)
+pub struct decoding::FrameDecoder
+pub fn decoding::FrameDecoder::add_dict(&mut self, decoding::dictionary::Dictionary) -> core::result::Result<(), decoding::errors::FrameDecoderError>
+pub fn decoding::FrameDecoder::blocks_decoded(&self) -> usize
+pub fn decoding::FrameDecoder::bytes_read_from_source(&self) -> u64
+pub fn decoding::FrameDecoder::can_collect(&self) -> usize
+pub fn decoding::FrameDecoder::collect(&mut self) -> core::option::Option<alloc::vec::Vec<u8>>
+pub fn decoding::FrameDecoder::collect_to_writer(&mut self, impl core::io::write::Write) -> core::result::Result<usize, core::io::error::Error>
+pub fn decoding::FrameDecoder::content_size(&self) -> u64
+pub fn decoding::FrameDecoder::decode_all(&mut self, &[u8], &mut [u8]) -> core::result::Result<usize, decoding::errors::FrameDecoderError>
+pub fn decoding::FrameDecoder::decode_all_to_vec(&mut self, &[u8], &mut alloc::vec::Vec<u8>) -> core::result::Result<(), decoding::errors::FrameDecoderError>
+pub fn decoding::FrameDecoder::decode_blocks(&mut self, impl alloc::io::read::Read, decoding::BlockDecodingStrategy) -> core::result::Result<bool, decoding::errors::FrameDecoderError>
+pub fn decoding::FrameDecoder::decode_from_to(&mut self, &[u8], &mut [u8]) -> core::result::Result<(usize, usize), decoding::errors::FrameDecoderError>
+pub fn decoding::FrameDecoder::force_dict(&mut self, u32) -> core::result::Result<(), decoding::errors::FrameDecoderError>
+pub fn decoding::FrameDecoder::get_calculated_checksum(&self) -> core::option::Option<u32>
+pub fn decoding::FrameDecoder::get_checksum_from_data(&self) -> core::option::Option<u32>
+pub fn decoding::FrameDecoder::init(&mut self, impl alloc::io::read::Read) -> core::result::Result<(), decoding::errors::FrameDecoderError>
+pub fn decoding::FrameDecoder::is_finished(&self) -> bool
+pub fn decoding::FrameDecoder::new() -> decoding::FrameDecoder
+pub fn decoding::FrameDecoder::reset(&mut self, impl alloc::io::read::Read) -> core::result::Result<(), decoding::errors::FrameDecoderError>
+pub struct decoding::StreamingDecoder<READ: alloc::io::read::Read, DEC: core::borrow::BorrowMut<decoding::FrameDecoder>>
+pub decoding::StreamingDecoder::decoder: DEC
+pub fn decoding::StreamingDecoder<READ, DEC>::get_mut(&mut self) -> &mut READ
+pub fn decoding::StreamingDecoder<READ, DEC>::get_ref(&self) -> &READ
+pub fn decoding::StreamingDecoder<READ, DEC>::into_frame_decoder(self) -> DEC
+pub fn decoding::StreamingDecoder<READ, DEC>::into_inner(self) -> READ where READ: core::marker::Sized
+pub fn decoding::StreamingDecoder<READ, DEC>::into_parts(self) -> (READ, DEC) where READ: core::marker::Sized
+pub fn decoding::StreamingDecoder<READ, DEC>::max_output_size(&self) -> core::option::Option<usize>
+pub fn decoding::StreamingDecoder<READ, DEC>::set_max_output_size(&mut self, core::option::Option<usize>)
+pub fn decoding::StreamingDecoder<READ, DEC>::new_with_decoder(READ, DEC) -> core::result::Result<decoding::StreamingDecoder<READ, DEC>, decoding::errors::FrameDecoderError>
+pub fn decoding::StreamingDecoder<READ, decoding::FrameDecoder>::new(READ) -> core::result::Result<decoding::StreamingDecoder<READ, decoding::FrameDecoder>, decoding::errors::FrameDecoderError>
+pub const decoding::DEFAULT_DECODE_OUTPUT_CAP: usize
+pub mod encoding
+pub mod encoding::compress_params
+#[repr(u8)] pub enum encoding::compress_params::Strategy
+pub encoding::compress_params::Strategy::BtLazy2 = 6
+pub encoding::compress_params::Strategy::BtOpt = 7
+pub encoding::compress_params::Strategy::BtUltra = 8
+pub encoding::compress_params::Strategy::BtUltra2 = 9
+pub encoding::compress_params::Strategy::DFast = 2
+pub encoding::compress_params::Strategy::Fast = 1
+pub encoding::compress_params::Strategy::Greedy = 3
+pub encoding::compress_params::Strategy::Lazy = 4
+pub encoding::compress_params::Strategy::Lazy2 = 5
+pub struct encoding::compress_params::CompressionParams
+pub encoding::compress_params::CompressionParams::chain_log: u32
+pub encoding::compress_params::CompressionParams::hash_log: u32
+pub encoding::compress_params::CompressionParams::min_match: u32
+pub encoding::compress_params::CompressionParams::search_log: u32
+pub encoding::compress_params::CompressionParams::strategy: encoding::compress_params::Strategy
+pub encoding::compress_params::CompressionParams::target_length: u32
+pub encoding::compress_params::CompressionParams::window_log: u32
+pub fn encoding::compress_params::CompressionParams::chain_table_size(&self) -> usize
+pub fn encoding::compress_params::CompressionParams::hash_table_size(&self) -> usize
+pub fn encoding::compress_params::CompressionParams::search_depth(&self) -> usize
+pub fn encoding::compress_params::CompressionParams::window_size(&self) -> usize
+pub fn encoding::compress_params::params_for_level(i32, core::option::Option<u64>) -> encoding::compress_params::CompressionParams
+pub mod encoding::zstd_match
+pub struct encoding::zstd_match::CompressedBlock
+pub encoding::zstd_match::CompressedBlock::literals: alloc::vec::Vec<u8>
+pub encoding::zstd_match::CompressedBlock::sequences: alloc::vec::Vec<encoding::zstd_match::SequenceOut>
+pub struct encoding::zstd_match::MatchState
+pub fn encoding::zstd_match::MatchState::chain_table_mut(&mut self) -> &mut alloc::vec::Vec<u32>
+pub fn encoding::zstd_match::MatchState::compress_block(&mut self, &[u8], &encoding::compress_params::CompressionParams) -> encoding::zstd_match::CompressedBlock
+pub fn encoding::zstd_match::MatchState::ensure_chain_table(&mut self, u32)
+pub fn encoding::zstd_match::MatchState::ensure_hash_table(&mut self, u32)
+pub fn encoding::zstd_match::MatchState::ensure_hash_table2(&mut self, u32)
+pub fn encoding::zstd_match::MatchState::hash_table2_mut(&mut self) -> &mut alloc::vec::Vec<u32>
+pub fn encoding::zstd_match::MatchState::hash_table_mut(&mut self) -> &mut alloc::vec::Vec<u32>
+pub fn encoding::zstd_match::MatchState::new(&encoding::compress_params::CompressionParams) -> Self
+pub fn encoding::zstd_match::MatchState::rep_offsets(&self) -> &[u32; 3]
+pub fn encoding::zstd_match::MatchState::reset(&mut self, &encoding::compress_params::CompressionParams)
+pub fn encoding::zstd_match::MatchState::seed_from_dict(&mut self, &[u8], &[u32; 3])
+pub fn encoding::zstd_match::MatchState::update_window_only(&mut self, &[u8])
+pub fn encoding::zstd_match::MatchState::window(&self) -> &[u8]
+pub struct encoding::zstd_match::RepCodes
+pub encoding::zstd_match::RepCodes::rep: [u32; 3]
+pub fn encoding::zstd_match::RepCodes::get_offset(&self, usize, u32) -> u32
+pub fn encoding::zstd_match::RepCodes::new() -> Self
+pub fn encoding::zstd_match::RepCodes::off_base_for_rep(usize) -> u32
+pub fn encoding::zstd_match::RepCodes::update(&mut self, u32, u32)
+pub struct encoding::zstd_match::SequenceOut
+pub encoding::zstd_match::SequenceOut::lit_len: u32
+pub encoding::zstd_match::SequenceOut::match_len: u32
+pub encoding::zstd_match::SequenceOut::off_base: u32
+pub fn encoding::zstd_match::compress_block_zstd(&[u8], &encoding::compress_params::CompressionParams) -> encoding::zstd_match::CompressedBlock
+pub fn encoding::zstd_match::compress_block_zstd_with_dict(&[u8], &encoding::compress_params::CompressionParams, &[u8], &[u32; 3]) -> encoding::zstd_match::CompressedBlock
+pub enum encoding::CompressionLevel
+pub encoding::CompressionLevel::Best
+pub encoding::CompressionLevel::Better
+pub encoding::CompressionLevel::Default
+pub encoding::CompressionLevel::Fastest
+pub encoding::CompressionLevel::Level(i32)
+pub encoding::CompressionLevel::Uncompressed
+pub fn encoding::CompressionLevel::to_level(self) -> i32
+pub enum encoding::Sequence<'data>
+pub encoding::Sequence::Literals
+pub encoding::Sequence::Literals::literals: &'data [u8]
+pub encoding::Sequence::Triple
+pub encoding::Sequence::Triple::literals: &'data [u8]
+pub encoding::Sequence::Triple::match_len: usize
+pub encoding::Sequence::Triple::offset: usize
+pub struct encoding::EncoderDictionary
+pub encoding::EncoderDictionary::content: alloc::vec::Vec<u8>
+pub encoding::EncoderDictionary::id: u32
+pub encoding::EncoderDictionary::offset_hist: [u32; 3]
+pub fn encoding::EncoderDictionary::new_raw(u32, alloc::vec::Vec<u8>) -> Self
+pub fn encoding::EncoderDictionary::parse(&[u8]) -> core::option::Option<Self>
+pub struct encoding::FrameCompressor<R: alloc::io::read::Read, W: core::io::write::Write, M: encoding::Matcher>
+pub fn encoding::FrameCompressor<R, W, M>::clear_dictionary(&mut self) -> core::option::Option<encoding::EncoderDictionary>
+pub fn encoding::FrameCompressor<R, W, M>::compress(&mut self)
+pub fn encoding::FrameCompressor<R, W, M>::compression_level(&self) -> encoding::CompressionLevel
+pub fn encoding::FrameCompressor<R, W, M>::drain(&self) -> core::option::Option<&W>
+pub fn encoding::FrameCompressor<R, W, M>::drain_mut(&mut self) -> core::option::Option<&mut W>
+pub fn encoding::FrameCompressor<R, W, M>::new_with_matcher(M, encoding::CompressionLevel) -> Self
+pub fn encoding::FrameCompressor<R, W, M>::replace_matcher(&mut self, M) -> M
+pub fn encoding::FrameCompressor<R, W, M>::set_compression_level(&mut self, encoding::CompressionLevel) -> encoding::CompressionLevel
+pub fn encoding::FrameCompressor<R, W, M>::set_dictionary(&mut self, encoding::EncoderDictionary) -> core::option::Option<encoding::EncoderDictionary>
+pub fn encoding::FrameCompressor<R, W, M>::set_drain(&mut self, W) -> core::option::Option<W>
+pub fn encoding::FrameCompressor<R, W, M>::set_source(&mut self, R) -> core::option::Option<R>
+pub fn encoding::FrameCompressor<R, W, M>::source(&self) -> core::option::Option<&R>
+pub fn encoding::FrameCompressor<R, W, M>::source_mut(&mut self) -> core::option::Option<&mut R>
+pub fn encoding::FrameCompressor<R, W, M>::take_drain(&mut self) -> core::option::Option<W>
+pub fn encoding::FrameCompressor<R, W, M>::take_source(&mut self) -> core::option::Option<R>
+pub fn encoding::FrameCompressor<R, W, encoding::MatchGeneratorDriver>::new(encoding::CompressionLevel) -> Self
+pub struct encoding::MatchGeneratorDriver
+pub struct encoding::StreamingEncoder<W: core::io::write::Write>
+pub fn encoding::StreamingEncoder<W>::finish(self) -> core::io::error::Result<W>
+pub fn encoding::StreamingEncoder<W>::get_mut(&mut self) -> &mut W
+pub fn encoding::StreamingEncoder<W>::get_ref(&self) -> &W
+pub fn encoding::StreamingEncoder<W>::new(W, encoding::CompressionLevel) -> Self
+pub fn encoding::StreamingEncoder<W>::with_dictionary(W, encoding::CompressionLevel, encoding::EncoderDictionary) -> Self
+pub trait encoding::Matcher
+pub fn encoding::Matcher::commit_space(&mut self, alloc::vec::Vec<u8>)
+pub fn encoding::Matcher::get_last_space(&mut self) -> &[u8]
+pub fn encoding::Matcher::get_next_space(&mut self) -> alloc::vec::Vec<u8>
+pub fn encoding::Matcher::reset(&mut self, encoding::CompressionLevel)
+pub fn encoding::Matcher::skip_matching(&mut self)
+pub fn encoding::Matcher::start_matching(&mut self, impl for<'a> core::ops::function::FnMut(encoding::Sequence<'a>))
+pub fn encoding::Matcher::window_size(&self) -> u64
+pub fn encoding::compress<R: alloc::io::read::Read, W: core::io::write::Write>(R, W, encoding::CompressionLevel)
+pub fn encoding::compress_to_vec<R: alloc::io::read::Read>(R, encoding::CompressionLevel) -> alloc::vec::Vec<u8>
+pub fn encoding::compress_to_vec_with_dict<R: alloc::io::read::Read>(R, encoding::CompressionLevel, &encoding::EncoderDictionary) -> alloc::vec::Vec<u8>
+pub fn encoding::compress_with_dict<R: alloc::io::read::Read, W: core::io::write::Write>(R, W, encoding::CompressionLevel, &encoding::EncoderDictionary)
+pub mod io
+pub use io::Error
+pub use io::ErrorKind
+pub use io::Read
+pub use io::Write
+pub mod io_std
+pub use io_std::Error
+pub use io_std::ErrorKind
+pub use io_std::Read
+pub use io_std::Write
+pub mod stream
+pub struct stream::Decoder<READ: alloc::io::read::Read, DEC: core::borrow::BorrowMut<decoding::FrameDecoder>>
+pub stream::Decoder::decoder: DEC
+pub fn decoding::StreamingDecoder<READ, DEC>::get_mut(&mut self) -> &mut READ
+pub fn decoding::StreamingDecoder<READ, DEC>::get_ref(&self) -> &READ
+pub fn decoding::StreamingDecoder<READ, DEC>::into_frame_decoder(self) -> DEC
+pub fn decoding::StreamingDecoder<READ, DEC>::into_inner(self) -> READ where READ: core::marker::Sized
+pub fn decoding::StreamingDecoder<READ, DEC>::into_parts(self) -> (READ, DEC) where READ: core::marker::Sized
+pub fn decoding::StreamingDecoder<READ, DEC>::max_output_size(&self) -> core::option::Option<usize>
+pub fn decoding::StreamingDecoder<READ, DEC>::set_max_output_size(&mut self, core::option::Option<usize>)
+pub fn decoding::StreamingDecoder<READ, DEC>::new_with_decoder(READ, DEC) -> core::result::Result<decoding::StreamingDecoder<READ, DEC>, decoding::errors::FrameDecoderError>
+pub fn decoding::StreamingDecoder<READ, decoding::FrameDecoder>::new(READ) -> core::result::Result<decoding::StreamingDecoder<READ, decoding::FrameDecoder>, decoding::errors::FrameDecoderError>
+pub struct stream::Encoder<W: core::io::write::Write>
+pub fn encoding::StreamingEncoder<W>::finish(self) -> core::io::error::Result<W>
+pub fn encoding::StreamingEncoder<W>::get_mut(&mut self) -> &mut W
+pub fn encoding::StreamingEncoder<W>::get_ref(&self) -> &W
+pub fn encoding::StreamingEncoder<W>::new(W, encoding::CompressionLevel) -> Self
+pub fn encoding::StreamingEncoder<W>::with_dictionary(W, encoding::CompressionLevel, encoding::EncoderDictionary) -> Self
+pub fn stream::copy_decode<R: alloc::io::read::Read, W: core::io::write::Write>(R, W) -> core::io::error::Result<()>
+pub fn stream::copy_decode_unbounded<R: alloc::io::read::Read, W: core::io::write::Write>(R, W) -> core::io::error::Result<()>
+pub fn stream::copy_decode_with_max<R: alloc::io::read::Read, W: core::io::write::Write>(R, W, core::option::Option<usize>) -> core::io::error::Result<()>
+pub fn stream::copy_encode<R: alloc::io::read::Read, W: core::io::write::Write>(R, W, i32) -> core::io::error::Result<()>
+pub fn stream::decode_all<R: alloc::io::read::Read>(R) -> core::io::error::Result<alloc::vec::Vec<u8>>
+pub fn stream::decode_all_unbounded<R: alloc::io::read::Read>(R) -> core::io::error::Result<alloc::vec::Vec<u8>>
+pub fn stream::decode_all_with_max<R: alloc::io::read::Read>(R, core::option::Option<usize>) -> core::io::error::Result<alloc::vec::Vec<u8>>
+pub fn stream::encode_all<R: alloc::io::read::Read>(R, i32) -> core::io::error::Result<alloc::vec::Vec<u8>>
+
+## trait impls (32 types)
+
+decoding::FrameDecoder: Default, Read
+decoding::StreamingDecoder<READ, DEC>: Read
+decoding::errors::BlockHeaderReadError: Debug, Display, Error, From<core::io::error::Error>, From<decoding::errors::BlockSizeError>, From<decoding::errors::BlockTypeError>
+decoding::errors::BlockSizeError: Debug, Display, Error
+decoding::errors::BlockTypeError: Debug, Display, Error
+decoding::errors::DecodeBlockContentError: Debug, Display, Error, From<decoding::errors::DecompressBlockError>
+decoding::errors::DecodeBufferError: Debug, Display, Error
+decoding::errors::DecodeSequenceError: Debug, Display, Error, From<decoding::errors::FSEDecoderError>, From<decoding::errors::FSETableError>
+decoding::errors::DecompressBlockError: Debug, Display, Error, From<core::io::error::Error>, From<decoding::errors::DecodeBufferError>, From<decoding::errors::DecodeSequenceError>, From<decoding::errors::DecompressLiteralsError>, From<decoding::errors::ExecuteSequencesError>, From<decoding::errors::FSEDecoderError>, From<decoding::errors::FSETableError>, From<decoding::errors::LiteralsSectionParseError>, From<decoding::errors::SequencesHeaderParseError>
+decoding::errors::DecompressLiteralsError: Debug, Display, Error, From<decoding::errors::HuffmanDecoderError>, From<decoding::errors::HuffmanTableError>
+decoding::errors::DictionaryDecodeError: Debug, Display, Error, From<decoding::errors::FSETableError>, From<decoding::errors::HuffmanTableError>
+decoding::errors::ExecuteSequencesError: Debug, Display, Error, From<decoding::errors::DecodeBufferError>
+decoding::errors::FSEDecoderError: Debug, Display, Error
+decoding::errors::FSETableError: Debug, Display, Error
+decoding::errors::FrameDecoderError: Debug, Display, Error, From<decoding::errors::BlockHeaderReadError>, From<decoding::errors::DictionaryDecodeError>, From<decoding::errors::FrameHeaderError>, From<decoding::errors::ReadFrameHeaderError>
+decoding::errors::FrameDescriptorError: Debug, Display, Error
+decoding::errors::FrameHeaderError: Debug, Display, Error, From<decoding::errors::FrameDescriptorError>
+decoding::errors::HuffmanDecoderError: Debug, Display, Error
+decoding::errors::HuffmanTableError: Debug, Display, Error, From<decoding::errors::FSEDecoderError>, From<decoding::errors::FSETableError>
+decoding::errors::LiteralsSectionParseError: Debug, Display, Error
+decoding::errors::ReadFrameHeaderError: Debug, Display, Error, From<decoding::errors::FrameDescriptorError>
+decoding::errors::SequencesHeaderParseError: Debug, Display, Error
+encoding::CompressionLevel: Clone, Copy, Debug
+encoding::EncoderDictionary: Clone
+encoding::MatchGeneratorDriver: encoding::Matcher
+encoding::Sequence<'data>: Debug, Eq, PartialEq
+encoding::StreamingEncoder<W>: Write
+encoding::compress_params::CompressionParams: Clone, Copy, Debug, Eq, PartialEq
+encoding::compress_params::Strategy: Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd
+encoding::zstd_match::CompressedBlock: Clone, Debug
+encoding::zstd_match::RepCodes: Clone, Debug, Default
+encoding::zstd_match::SequenceOut: Clone, Copy, Debug, Eq, PartialEq
+
+## auto traits
+
+27 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
+decoding::StreamingDecoder<READ, DEC>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe
+decoding::errors::BlockHeaderReadError: !RefUnwindSafe !UnwindSafe
+decoding::errors::DecodeBlockContentError: !RefUnwindSafe !UnwindSafe
+decoding::errors::DecompressBlockError: !RefUnwindSafe !UnwindSafe
+decoding::errors::FrameDecoderError: !RefUnwindSafe !UnwindSafe
+decoding::errors::ReadFrameHeaderError: !RefUnwindSafe !UnwindSafe
+encoding::FrameCompressor<R, W, M>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe
+encoding::StreamingEncoder<W>: !Freeze !RefUnwindSafe !Send !Sync !Unpin !UnwindSafe

@@ -1,0 +1,147 @@
+# zenzstd public API — additions from non-default features
+# features: dict_builder,fuzz_exports,hash,simd,std,unsafe-compress,unsafe-decompress
+# (regenerated on every `cargo test` by zenutils-apidoc; ZEN_API_DOC=check verifies, =off skips).
+# Encodings: crate-name prefix stripped; auto traits collapse to a
+# count + exceptions; trait impls collapse to one roster line per
+# type (method signatures live at the trait definition); blanket
+# impls omitted; re-export duplicates annotated `[also: path]`.
+# DO NOT EDIT BY HAND — commit regenerated changes with the code.
+
+## summary
+#
+#   pub modules                                 7
+#   pub types (struct/enum/trait/alias)        14
+#   pub consts/statics                          1
+#   free functions                              7
+#   inherent methods                           42
+#   struct fields                              36
+#   trait roster entries (type × trait)        16
+#   auto-trait-complete types                  14
+#
+# per-module pub lines:
+#   (root)                            3
+#   decoding                         40
+#   dictionary                        2
+#   fse                              41
+#   huff0                            21
+
+## items (103 lines)
+
+pub mod decoding::dictionary
+pub struct decoding::dictionary::Dictionary
+pub decoding::dictionary::Dictionary::dict_content: alloc::vec::Vec<u8>
+pub decoding::dictionary::Dictionary::fse: decoding::scratch::FSEScratch
+pub decoding::dictionary::Dictionary::huf: decoding::scratch::HuffmanScratch
+pub decoding::dictionary::Dictionary::id: u32
+pub decoding::dictionary::Dictionary::offset_hist: [u32; 3]
+pub fn decoding::dictionary::Dictionary::decode_dict(&[u8]) -> core::result::Result<decoding::dictionary::Dictionary, decoding::errors::DictionaryDecodeError>
+pub const decoding::dictionary::MAGIC_NUM: [u8; 4]
+pub mod decoding::scratch
+pub struct decoding::scratch::DecoderScratch
+pub decoding::scratch::DecoderScratch::block_content_buffer: alloc::vec::Vec<u8>
+pub decoding::scratch::DecoderScratch::buffer: decoding::decode_buffer::DecodeBuffer
+pub decoding::scratch::DecoderScratch::fse: decoding::scratch::FSEScratch
+pub decoding::scratch::DecoderScratch::huf: decoding::scratch::HuffmanScratch
+pub decoding::scratch::DecoderScratch::literals_buffer: alloc::vec::Vec<u8>
+pub decoding::scratch::DecoderScratch::offset_hist: [u32; 3]
+pub decoding::scratch::DecoderScratch::sequences: alloc::vec::Vec<blocks::sequence_section::Sequence>
+pub fn decoding::scratch::DecoderScratch::init_from_dict(&mut self, &decoding::dictionary::Dictionary)
+pub fn decoding::scratch::DecoderScratch::new(usize) -> decoding::scratch::DecoderScratch
+pub fn decoding::scratch::DecoderScratch::reset(&mut self, usize)
+pub struct decoding::scratch::FSEScratch
+pub decoding::scratch::FSEScratch::literal_lengths: fse::FSETable
+pub decoding::scratch::FSEScratch::ll_rle: core::option::Option<u8>
+pub decoding::scratch::FSEScratch::match_lengths: fse::FSETable
+pub decoding::scratch::FSEScratch::ml_rle: core::option::Option<u8>
+pub decoding::scratch::FSEScratch::of_rle: core::option::Option<u8>
+pub decoding::scratch::FSEScratch::offsets: fse::FSETable
+pub decoding::scratch::FSEScratch::seq_ll: alloc::vec::Vec<fse::SeqEntry>
+pub decoding::scratch::FSEScratch::seq_ml: alloc::vec::Vec<fse::SeqEntry>
+pub decoding::scratch::FSEScratch::seq_of: alloc::vec::Vec<fse::SeqEntry>
+pub fn decoding::scratch::FSEScratch::build_predefined_ll(&mut self, u8, &[i32]) -> core::result::Result<(), decoding::errors::FSETableError>
+pub fn decoding::scratch::FSEScratch::build_predefined_ml(&mut self, u8, &[i32]) -> core::result::Result<(), decoding::errors::FSETableError>
+pub fn decoding::scratch::FSEScratch::build_predefined_of(&mut self, u8, &[i32]) -> core::result::Result<(), decoding::errors::FSETableError>
+pub fn decoding::scratch::FSEScratch::new() -> decoding::scratch::FSEScratch
+pub fn decoding::scratch::FSEScratch::rebuild_seq_tables(&mut self, &[(u32, u8)], &[(u32, u8)])
+pub fn decoding::scratch::FSEScratch::reinit_from(&mut self, &Self)
+pub struct decoding::scratch::HuffmanScratch
+pub decoding::scratch::HuffmanScratch::table: huff0::HuffmanTable
+pub fn decoding::scratch::HuffmanScratch::new() -> decoding::scratch::HuffmanScratch
+pub mod dictionary
+pub fn dictionary::create_raw_dict_from_dir<P: core::convert::AsRef<std::path::Path>, W: core::io::write::Write>(P, &mut W, usize) -> core::result::Result<(), core::io::error::Error>
+pub fn dictionary::create_raw_dict_from_source<R: alloc::io::read::Read, W: core::io::write::Write>(R, usize, &mut W, usize)
+pub mod fse
+pub mod fse::fse_encoder
+pub fn fse::fse_encoder::FSETable::acc_log(&self) -> u8
+pub fn fse::fse_encoder::build_table_from_data(impl core::iter::traits::iterator::Iterator<Item = u8>, u8, bool) -> fse::fse_encoder::FSETable
+pub struct fse::Entry [also: huff0]
+pub fse::Entry::base_line: u32
+pub fse::Entry::num_bits: u8
+pub fse::Entry::symbol: u8
+pub struct fse::FSEDecoder<'table>
+pub fse::FSEDecoder::state: fse::Entry
+pub fn fse::FSEDecoder<'t>::apply_state_update(&mut self, u64)
+pub fn fse::FSEDecoder<'t>::decode_and_params(&self) -> (u8, u8, u32)
+pub fn fse::FSEDecoder<'t>::decode_symbol(&self) -> u8
+pub fn fse::FSEDecoder<'t>::init_state(&mut self, &mut bit_io::bit_reader_reverse::BitReaderReversed<'_>) -> core::result::Result<(), decoding::errors::FSEDecoderError>
+pub fn fse::FSEDecoder<'t>::new(&'t fse::FSETable) -> fse::FSEDecoder<'t>
+pub fn fse::FSEDecoder<'t>::state_update_params(&self) -> (u8, u32)
+pub fn fse::FSEDecoder<'t>::update_state(&mut self, &mut bit_io::bit_reader_reverse::BitReaderReversed<'_>)
+pub struct fse::FSETable [also: fse::fse_encoder]
+pub fse::FSETable::accuracy_log: u8
+pub fse::FSETable::decode: alloc::vec::Vec<fse::Entry>
+pub fse::FSETable::symbol_probabilities: alloc::vec::Vec<i32>
+pub fn fse::FSETable::build_decoder(&mut self, &[u8], u8) -> core::result::Result<usize, decoding::errors::FSETableError>
+pub fn fse::FSETable::build_from_probabilities(&mut self, u8, &[i32]) -> core::result::Result<(), decoding::errors::FSETableError>
+pub fn fse::FSETable::new(u8) -> fse::FSETable
+pub fn fse::FSETable::reinit_from(&mut self, &Self)
+pub fn fse::FSETable::reset(&mut self)
+pub fn fse::FSETable::restore_from_prebuilt(&mut self, u8, &[fse::Entry])
+#[repr(C)] pub struct fse::SeqEntry
+pub fse::SeqEntry::base_value: u32
+pub fse::SeqEntry::extra_bits: u8
+pub fse::SeqEntry::next_state: u16
+pub fse::SeqEntry::state_bits: u8
+pub struct fse::SeqFSEDecoder<'table>
+pub fse::SeqFSEDecoder::state: usize
+pub fn fse::SeqFSEDecoder<'t>::apply_state_update(&mut self, u16, u64)
+pub fn fse::SeqFSEDecoder<'t>::decode_params(&self) -> (u32, u8, u16, u8)
+pub fn fse::SeqFSEDecoder<'t>::init_state(&mut self, &mut bit_io::bit_reader_reverse::BitReaderReversed<'_>, u8) -> core::result::Result<(), decoding::errors::FSEDecoderError>
+pub fn fse::SeqFSEDecoder<'t>::new(&'t [fse::SeqEntry]) -> fse::SeqFSEDecoder<'t>
+pub fn fse::build_seq_table(&fse::FSETable, &[(u32, u8)]) -> alloc::vec::Vec<fse::SeqEntry>
+pub fn fse::build_seq_table_offset(&fse::FSETable) -> alloc::vec::Vec<fse::SeqEntry>
+pub fn fse::round_trip(&[u8]) [also: huff0]
+pub mod huff0
+pub mod huff0::huff0_encoder
+pub fn huff0::huff0_encoder::HuffmanTable::build_from_counts(&[usize]) -> Self
+pub fn huff0::huff0_encoder::HuffmanTable::build_from_data(&[u8]) -> Self
+pub fn huff0::huff0_encoder::HuffmanTable::build_from_weights(&[usize]) -> Self
+pub fn huff0::huff0_encoder::HuffmanTable::can_encode(&self, &Self) -> core::option::Option<usize>
+pub struct huff0::HuffmanDecoder<'table>
+pub huff0::HuffmanDecoder::state: u64
+pub fn huff0::HuffmanDecoder<'t>::decode_and_advance_unchecked(&mut self, &mut bit_io::bit_reader_reverse::BitReaderReversed<'_>) -> u8
+pub fn huff0::HuffmanDecoder<'t>::decode_symbol(&self) -> u8
+pub fn huff0::HuffmanDecoder<'t>::init_state(&mut self, &mut bit_io::bit_reader_reverse::BitReaderReversed<'_>) -> u8
+pub fn huff0::HuffmanDecoder<'t>::new(&'t huff0::HuffmanTable) -> huff0::HuffmanDecoder<'t>
+pub fn huff0::HuffmanDecoder<'t>::next_state(&mut self, &mut bit_io::bit_reader_reverse::BitReaderReversed<'_>) -> u8
+pub struct huff0::HuffmanTable [also: huff0::huff0_encoder]
+pub huff0::HuffmanTable::max_num_bits: u8
+pub fn huff0::HuffmanTable::build_decoder(&mut self, &[u8]) -> core::result::Result<u32, decoding::errors::HuffmanTableError>
+pub fn huff0::HuffmanTable::new() -> huff0::HuffmanTable
+pub fn huff0::HuffmanTable::reinit_from(&mut self, &Self)
+pub fn huff0::HuffmanTable::reset(&mut self)
+
+## trait impls (8 types)
+
+decoding::scratch::FSEScratch: Default
+decoding::scratch::HuffmanScratch: Default
+fse::Entry: Clone, Copy, Debug
+fse::FSETable: Clone, Debug
+fse::SeqEntry: Clone, Copy, Debug
+fse::fse_encoder::FSETable: Clone, Debug
+huff0::Entry: Clone, Copy, Debug
+huff0::HuffmanTable: Default
+
+## auto traits
+
+14 types implement all of: Freeze, RefUnwindSafe, Send, Sync, Unpin, UnwindSafe
