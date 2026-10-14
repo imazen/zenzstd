@@ -2,7 +2,7 @@
 
 # zenzstd
 
-A pure-Rust [Zstandard](https://www.rfc-editor.org/rfc/rfc8878) (RFC 8878) compressor and decompressor. `#![forbid(unsafe_code)]` by default and `no_std + alloc`, so it runs anywhere from servers to embedded targets to WebAssembly.
+A pure-Rust [Zstandard](https://www.rfc-editor.org/rfc/rfc8878) (RFC 8878, Yann Collet) compressor and decompressor. `#![forbid(unsafe_code)]` by default and `no_std + alloc`, so it runs anywhere from servers to embedded targets to WebAssembly.
 
 The decoder builds on the well-maintained [`ruzstd`](https://crates.io/crates/ruzstd) decoder (39M+ downloads). `zenzstd` adds a full compressor (levels 1-22), `std::io` streaming encode/decode, dictionary support, and optional SIMD acceleration via [archmage](https://crates.io/crates/archmage).
 
