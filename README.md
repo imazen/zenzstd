@@ -1,6 +1,6 @@
 # zenzstd [![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenzstd/ci.yml?style=flat-square&label=CI)](https://github.com/imazen/zenzstd/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/zenzstd?style=flat-square)](https://crates.io/crates/zenzstd) [![lib.rs](https://img.shields.io/crates/v/zenzstd?style=flat-square&label=lib.rs&color=blue)](https://lib.rs/crates/zenzstd) [![docs.rs](https://img.shields.io/docsrs/zenzstd?style=flat-square)](https://docs.rs/zenzstd) [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?style=flat-square)](#minimum-supported-rust-version) [![license](https://img.shields.io/crates/l/zenzstd?style=flat-square)](#license)
 
-A pure-Rust [Zstandard](https://www.rfc-editor.org/rfc/rfc8878) (RFC 8878) compressor and decompressor. `#![forbid(unsafe_code)]` by default and `no_std + alloc`, so it runs anywhere from servers to embedded targets to WebAssembly.
+A pure-Rust [Zstandard](https://www.rfc-editor.org/rfc/rfc8878) (RFC 8878, Yann Collet) compressor and decompressor. `#![forbid(unsafe_code)]` by default and `no_std + alloc`, so it runs anywhere from servers to embedded targets to WebAssembly.
 
 The decoder builds on the well-maintained [`ruzstd`](https://crates.io/crates/ruzstd) decoder (39M+ downloads). `zenzstd` adds a full compressor (levels 1-22), `std::io` streaming encode/decode, dictionary support, and optional SIMD acceleration via [archmage](https://crates.io/crates/archmage).
 
