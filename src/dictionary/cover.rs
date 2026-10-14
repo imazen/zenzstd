@@ -4,7 +4,7 @@
 //!
 //! See: <https://people.eng.unimelb.edu.au/ammoffat/abstracts/lpmw16www.pdf>
 //!
-//! Facebook's implementation was also used as a reference.
+//! The zstd reference dictBuilder (Yann Collet) was also used as a reference.
 //! <https://github.com/facebook/zstd/tree/dev/lib/dictBuilder>
 
 use super::DictParams;
