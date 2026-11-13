@@ -74,6 +74,7 @@ const MAXIMUM_ALLOWED_WINDOW_SIZE: u64 = 1024 * 1024 * 100;
 pub struct FrameDecoder {
     state: Option<FrameDecoderState>,
     dicts: BTreeMap<u32, Dictionary>,
+    stop: Option<alloc::sync::Arc<dyn enough::Stop>>,
 }
 
 struct FrameDecoderState {
@@ -153,7 +154,24 @@ impl FrameDecoder {
         FrameDecoder {
             state: None,
             dicts: BTreeMap::new(),
+            stop: None,
         }
+    }
+
+    /// Install a cooperative cancellation token.
+    ///
+    /// The token is polled once per block inside [`FrameDecoder::decode_blocks`];
+    /// a triggered token aborts decoding with [`FrameDecoderError::Cancelled`].
+    /// Callers that drive decoding through [`StreamingDecoder`](crate::decoding::StreamingDecoder)
+    /// get the same behaviour via [`StreamingDecoder::set_stop`](crate::decoding::StreamingDecoder::set_stop).
+    pub fn set_stop(&mut self, stop: alloc::sync::Arc<dyn enough::Stop>) {
+        self.stop = Some(stop);
+    }
+
+    /// Builder-style variant of [`FrameDecoder::set_stop`].
+    pub fn with_stop(mut self, stop: alloc::sync::Arc<dyn enough::Stop>) -> Self {
+        self.set_stop(stop);
+        self
     }
 
     /// init() will allocate all needed buffers if it is the first time this decoder is used
@@ -292,6 +310,9 @@ impl FrameDecoder {
         let buffer_size_before = state.decoder_scratch.buffer.len();
         let block_counter_before = state.block_counter;
         loop {
+            if let Some(stop) = self.stop.as_deref().and_then(|s| s.live()) {
+                stop.check().map_err(err::Cancelled)?;
+            }
             vprintln!("################");
             vprintln!("Next Block: {}", state.block_counter);
             vprintln!("################");
