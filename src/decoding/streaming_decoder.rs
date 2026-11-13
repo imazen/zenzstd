@@ -149,6 +149,16 @@ impl<READ: Read, DEC: BorrowMut<FrameDecoder>> StreamingDecoder<READ, DEC> {
     pub fn max_output_size(&self) -> Option<usize> {
         self.max_output_size
     }
+
+    /// Install a cooperative cancellation token on the inner [`FrameDecoder`].
+    ///
+    /// The token is polled once per zstd block while decoding; a triggered
+    /// token aborts the next [`Read::read`] with an [`crate::io::Error`]
+    /// wrapping
+    /// [`FrameDecoderError::Cancelled`](crate::decoding::FrameDecoderError::Cancelled).
+    pub fn set_stop(&mut self, stop: alloc::sync::Arc<dyn enough::Stop>) {
+        self.decoder.borrow_mut().set_stop(stop);
+    }
 }
 
 impl<READ: Read, DEC: BorrowMut<FrameDecoder>> Read for StreamingDecoder<READ, DEC> {

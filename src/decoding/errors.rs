@@ -525,6 +525,9 @@ pub enum FrameDecoderError {
     FailedToSkipFrame,
     TargetTooSmall,
     DictNotProvided { dict_id: u32 },
+    /// The installed `enough::Stop` token reported cancellation
+    /// (see [`FrameDecoder::set_stop`](crate::decoding::FrameDecoder::set_stop)).
+    Cancelled(enough::StopReason),
 }
 
 #[cfg(feature = "std")]
@@ -602,6 +605,9 @@ impl core::fmt::Display for FrameDecoderError {
                     f,
                     "Frame header specified dictionary id 0x{dict_id:X} that wasnt provided by add_dict() or reset_with_dict()"
                 )
+            }
+            FrameDecoderError::Cancelled(reason) => {
+                write!(f, "Decoding cancelled: {reason}")
             }
         }
     }

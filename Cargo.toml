@@ -61,6 +61,7 @@ collapsible_if = "allow"
 fastrand = { version = "2.3.0", optional = true }
 archmage = { version = "0.9.15", optional = true }
 magetypes = { version = "0.9.15", optional = true }
+enough = { version = "0.4.3", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # DEV-only: lets benches/kernel_tiers.rs disable the baseline SIMD token so
