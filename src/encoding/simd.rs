@@ -96,10 +96,10 @@ fn count_match_generic<T: magetypes::simd::backends::U8x16Backend>(
     while offset + 16 <= len {
         let chunk_a: &[u8; 16] = a[offset..offset + 16].try_into().unwrap();
         let chunk_b: &[u8; 16] = b[offset..offset + 16].try_into().unwrap();
-        let va = u8x16::load(token, chunk_a);
-        let vb = u8x16::load(token, chunk_b);
+        let va = u8x16::load_t(token, chunk_a);
+        let vb = u8x16::load_t(token, chunk_b);
         let diff = va ^ vb;
-        let zero = u8x16::zero(token);
+        let zero = u8x16::zero_t(token);
         let eq_mask = diff.simd_eq(zero);
         let mask = eq_mask.bitmask();
         if mask != 0xFFFF {
@@ -181,15 +181,15 @@ fn count_match_v3(token: archmage::X64V3Token, a: &[u8], b: &[u8]) -> usize {
         let chunk_a: &[u8; 32] = a[offset..offset + 32].try_into().unwrap();
         let chunk_b: &[u8; 32] = b[offset..offset + 32].try_into().unwrap();
 
-        let va = u8x32::load(token, chunk_a);
-        let vb = u8x32::load(token, chunk_b);
+        let va = u8x32::load_t(token, chunk_a);
+        let vb = u8x32::load_t(token, chunk_b);
 
         // XOR: matching bytes become 0x00, differing bytes become non-zero.
         let diff = va ^ vb;
 
         // Compare each lane against zero. simd_eq returns 0xFF for lanes that
         // are zero (matching bytes), 0x00 for non-zero (differing bytes).
-        let zero = u8x32::zero(token);
+        let zero = u8x32::zero_t(token);
         let eq_mask = diff.simd_eq(zero);
 
         // Extract high bit of each byte lane into a u32. Matching bytes
