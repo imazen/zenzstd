@@ -26,6 +26,7 @@ breaking changes bump the minor version.
   the 8 MiB cap fails the table check at level 20.
 
 ### Changed
+- Bumped `archmage` and `magetypes` dependency requirements to `0.9.33` and refreshed `Cargo.lock` and `fuzz/Cargo.lock`.
 - Bumped `zenbench` dev-dependency requirement to `0.1.11` and refreshed `Cargo.lock` and `fuzz/Cargo.lock` within compatible bounds (`arbitrary` 1.5.0, `rand` 0.10.4, `ruzstd` 0.9.1, `zstd` 0.13.5, `zerocopy` 0.8.64, `zenbench` 0.1.11, and `fastrand` 2.5.0 in `fuzz/`).
 - Removed `macos-26-intel` from the CI matrix (`.github/workflows/ci.yml`) and switched `decoding::sequence_section_decoder::test_ll_default`'s print loop to `iter().enumerate()` to satisfy Rust 1.100 `clippy --all-targets -- -D warnings`.
 - Refreshed `Cargo.lock` within the existing requirements, third-party only
