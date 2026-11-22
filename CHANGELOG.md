@@ -26,6 +26,7 @@ breaking changes bump the minor version.
   the 8 MiB cap fails the table check at level 20.
 
 ### Changed
+- Removed `macos-26-intel` from the CI matrix (`.github/workflows/ci.yml`) and switched `decoding::sequence_section_decoder::test_ll_default`'s print loop to `iter().enumerate()` to satisfy Rust 1.100 `clippy --all-targets -- -D warnings`.
 - Refreshed `Cargo.lock` within the existing requirements, third-party only
   (`ead29e2`). `magetypes` (0.9.26) and `zenbench` (0.1.8) were pinned back to
   the versions the lock already held — they are zen-family crates whose
