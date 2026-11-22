@@ -234,10 +234,10 @@ pub fn params_for_level(level: i32, src_size: Option<u64>) -> CompressionParams 
 /// * The format spec recommends encoders not require more than 8 MiB, because
 ///   that is the floor decoders are asked to support:
 ///   <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#window_descriptor>
-/// * This crate's own decoder refuses anything over 100 MiB
-///   (`MAXIMUM_ALLOWED_WINDOW_SIZE` in `decoding/frame_decoder.rs`), so an
-///   honest `window_log 27` declaration would produce frames we cannot read
-///   back ourselves.
+/// * This crate's own decoder caps accepted windows at 128 MiB
+///   (`MAXIMUM_ALLOWED_WINDOW_SIZE` in `decoding/frame_decoder.rs`, matching
+///   libzstd's `ZSTD_WINDOWLOG_LIMIT_DEFAULT` / `window_log 27`), so capping
+///   the encoder at `window_log 23` (8 MiB) stays well below both limits.
 ///
 /// Capping here — rather than lying in the frame header — keeps the declared
 /// window and the reachable window the same number. The cap only changes

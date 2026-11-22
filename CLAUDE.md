@@ -94,12 +94,14 @@ length change anywhere. Regression: `tests/window_declaration.rs`.
 keeping in mind before raising it:
 - The format spec asks encoders not to require more than 8 MiB, since that is
   the floor decoders are asked to support.
-- Declaring the uncapped `window_log 27` (128 MiB) at L22 makes **our own**
-  `FrameDecoder` reject the frame with `WindowSizeTooBig`. Note that limit is
-  asymmetric: `MAXIMUM_ALLOWED_WINDOW_SIZE` (100 MiB) is checked in
-  `FrameDecoderState::reset` but **not** in `FrameDecoderState::new`, so a fresh
-  decoder accepts a window a reused one refuses. Measured, not inferred;
-  tracked in #10.
+- Previously, declaring the uncapped `window_log 27` (128 MiB) at L22 made **our
+  own** `FrameDecoder` reject the frame with `WindowSizeTooBig` on reuse
+  (`MAXIMUM_ALLOWED_WINDOW_SIZE` was 100 MiB and was checked in
+  `FrameDecoderState::reset` but not `FrameDecoderState::new`). Fixed in #10:
+  `MAXIMUM_ALLOWED_WINDOW_SIZE` is now 128 MiB (`1 << 27`, matching libzstd's
+  `ZSTD_WINDOWLOG_LIMIT_DEFAULT`) and enforced symmetrically in both `new` and
+  `reset`. Keeping the encoder at `MAX_ENCODER_WINDOW_LOG = 23` (8 MiB) still
+  respects the spec's decoder-floor recommendation.
 
 The cap only changes levels 20-22 (table window_logs 25/26/27) and only for
 inputs larger than 8 MiB; nothing in the test corpus reaches that, so no

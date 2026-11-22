@@ -26,6 +26,7 @@ breaking changes bump the minor version.
   the 8 MiB cap fails the table check at level 20.
 
 ### Changed
+- Bumped `zenbench` dev-dependency requirement to `0.1.11` and refreshed `Cargo.lock` and `fuzz/Cargo.lock` within compatible bounds (`arbitrary` 1.5.0, `rand` 0.10.4, `ruzstd` 0.9.1, `zstd` 0.13.5, `zerocopy` 0.8.64, `zenbench` 0.1.11, and `fastrand` 2.5.0 in `fuzz/`).
 - Removed `macos-26-intel` from the CI matrix (`.github/workflows/ci.yml`) and switched `decoding::sequence_section_decoder::test_ll_default`'s print loop to `iter().enumerate()` to satisfy Rust 1.100 `clippy --all-targets -- -D warnings`.
 - Refreshed `Cargo.lock` within the existing requirements, third-party only
   (`ead29e2`). `magetypes` (0.9.26) and `zenbench` (0.1.8) were pinned back to
@@ -64,6 +65,15 @@ breaking changes bump the minor version.
 - README overhaul: corrected feature defaults (`simd` ships on by default), documented the experimental level 16-22 status and the 1 GiB decode-bomb output cap, added the standard badge row + MSRV badge, and split the crates.io README into `README.crates.md`.
 
 ### Fixed
+- **Symmetric 128 MiB decoder window cap across init and reset (#10).** Previously,
+  `FrameDecoderState::new` omitted the `MAXIMUM_ALLOWED_WINDOW_SIZE` check while
+  `FrameDecoderState::reset` rejected windows above 100 MiB, causing fresh and
+  reused decoders to disagree on large-window frames and preventing reuse on C
+  zstd level-22 (`window_log = 27`, 128 MiB) streams. Both
+  `FrameDecoderState::new` and `FrameDecoderState::reset` now share
+  `read_header_within_window_limit` before scratch allocation, and
+  `MAXIMUM_ALLOWED_WINDOW_SIZE` is set to 128 MiB (`1 << 27`, matching libzstd's
+  `ZSTD_WINDOWLOG_LIMIT_DEFAULT`).
 - **Frame header under-declared the window size, so C zstd mis-decoded our
   output above ~500 KB (#9).** The header advertised `MatchGeneratorDriver`'s
   fixed 128 KiB at every level, but only `Fastest` and `Uncompressed` match

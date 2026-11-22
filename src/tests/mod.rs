@@ -590,3 +590,242 @@ fn verbose_disabled() {
     use crate::VERBOSE;
     const { assert!(!VERBOSE) };
 }
+
+#[test]
+fn window_limit_enforced_on_init_and_reset() {
+    use crate::decoding::errors::FrameDecoderError;
+    use crate::decoding::{BlockDecodingStrategy, FrameDecoder, StreamingDecoder};
+
+    // Valid empty zstd frame (1 KiB window, last empty raw block).
+    let valid_frame: [u8; 9] = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x01, 0x00, 0x00];
+    // Exact boundary: 128 MiB (window_log = 27, exp = 17, mant = 0 => 134_217_728 bytes)
+    // and single-segment 134_217_728 bytes (4-byte FCS, no Window_Descriptor).
+    let exact_128m: [u8; 9] = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 17 << 3, 0x01, 0x00, 0x00];
+    let exact_128m_single_segment: [u8; 12] = [
+        0x28, 0xB5, 0x2F, 0xFD, 0xA0, 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00,
+    ];
+    // Over-limit frames (> 128 MiB):
+    // - 144 MiB: exp = 17, mant = 1 => 150_994_944 bytes
+    // - 256 MiB: window_log = 28, exp = 18, mant = 0 => 268_435_456 bytes
+    // - Single-segment 134_217_729 bytes (128 MiB + 1)
+    let over_limit_144m: [u8; 9] = [
+        0x28,
+        0xB5,
+        0x2F,
+        0xFD,
+        0x00,
+        (17 << 3) | 1,
+        0x01,
+        0x00,
+        0x00,
+    ];
+    let over_limit_256m: [u8; 9] = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 18 << 3, 0x01, 0x00, 0x00];
+    let over_limit_single_segment: [u8; 12] = [
+        0x28, 0xB5, 0x2F, 0xFD, 0xA0, 0x01, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00,
+    ];
+
+    let over_limit_cases: [(&str, &[u8], u64); 3] = [
+        ("144 MiB", &over_limit_144m, 150_994_944),
+        ("256 MiB", &over_limit_256m, 268_435_456),
+        (
+            "single-segment 128 MiB + 1",
+            &over_limit_single_segment,
+            134_217_729,
+        ),
+    ];
+
+    let assert_too_big = |res: Result<(), FrameDecoderError>, expected: u64, ctx: &str| {
+        assert!(
+            matches!(res, Err(FrameDecoderError::WindowSizeTooBig { requested }) if requested == expected),
+            "{ctx}: expected WindowSizeTooBig({expected}), got {res:?}"
+        );
+    };
+
+    // 0. Exact 128 MiB boundary succeeds on fresh init and reused reset/init + empty block decode.
+    for (label, frame) in [
+        ("128 MiB descriptor", &exact_128m[..]),
+        ("128 MiB single-segment", &exact_128m_single_segment[..]),
+    ] {
+        let mut dec = FrameDecoder::new();
+        let mut src = frame;
+        dec.init(&mut src)
+            .unwrap_or_else(|e| panic!("fresh init {label}: {e:?}"));
+        assert!(
+            dec.decode_blocks(&mut src, BlockDecodingStrategy::All)
+                .unwrap()
+        );
+        assert_eq!(dec.collect().unwrap(), &[]);
+    }
+    {
+        let mut dec = FrameDecoder::new();
+        let mut out = [0u8; 16];
+        assert_eq!(dec.decode_all(&valid_frame, &mut out).unwrap(), 0);
+        for (label, frame) in [
+            ("128 MiB descriptor", &exact_128m[..]),
+            ("128 MiB single-segment", &exact_128m_single_segment[..]),
+        ] {
+            let mut src = frame;
+            dec.reset(&mut src)
+                .unwrap_or_else(|e| panic!("reused reset {label}: {e:?}"));
+            assert!(
+                dec.decode_blocks(&mut src, BlockDecodingStrategy::All)
+                    .unwrap()
+            );
+            assert_eq!(dec.collect().unwrap(), &[]);
+
+            let mut src = frame;
+            dec.init(&mut src)
+                .unwrap_or_else(|e| panic!("reused init {label}: {e:?}"));
+            assert!(
+                dec.decode_blocks(&mut src, BlockDecodingStrategy::All)
+                    .unwrap()
+            );
+            assert_eq!(dec.collect().unwrap(), &[]);
+        }
+    }
+
+    let mut out = [0u8; 16];
+    let mut out_vec = Vec::new();
+
+    // 1. Fresh FrameDecoder paths (hit FrameDecoderState::new).
+    for (label, frame, expected) in over_limit_cases {
+        assert_too_big(
+            FrameDecoder::new().init(&mut { frame }),
+            expected,
+            &alloc::format!("fresh FrameDecoder::init ({label})"),
+        );
+        assert_too_big(
+            FrameDecoder::new().reset(&mut { frame }),
+            expected,
+            &alloc::format!("fresh FrameDecoder::reset ({label})"),
+        );
+        assert_too_big(
+            FrameDecoder::new()
+                .decode_from_to(frame, &mut out)
+                .map(|_| ()),
+            expected,
+            &alloc::format!("fresh FrameDecoder::decode_from_to ({label})"),
+        );
+        assert_too_big(
+            FrameDecoder::new().decode_all(frame, &mut out).map(|_| ()),
+            expected,
+            &alloc::format!("fresh FrameDecoder::decode_all ({label})"),
+        );
+        assert_too_big(
+            FrameDecoder::new().decode_all_to_vec(frame, &mut out_vec),
+            expected,
+            &alloc::format!("fresh FrameDecoder::decode_all_to_vec ({label})"),
+        );
+    }
+
+    // 2. Reused FrameDecoder paths (hit FrameDecoderState::reset).
+    let mut reused = FrameDecoder::new();
+    assert_eq!(reused.decode_all(&valid_frame, &mut out).unwrap(), 0);
+    for (label, frame, expected) in over_limit_cases {
+        assert_too_big(
+            reused.reset(&mut { frame }),
+            expected,
+            &alloc::format!("reused FrameDecoder::reset ({label})"),
+        );
+        assert_too_big(
+            reused.init(&mut { frame }),
+            expected,
+            &alloc::format!("reused FrameDecoder::init ({label})"),
+        );
+        assert_too_big(
+            reused.decode_all(frame, &mut out).map(|_| ()),
+            expected,
+            &alloc::format!("reused FrameDecoder::decode_all ({label})"),
+        );
+        assert_too_big(
+            reused.decode_all_to_vec(frame, &mut out_vec),
+            expected,
+            &alloc::format!("reused FrameDecoder::decode_all_to_vec ({label})"),
+        );
+
+        // Multi-frame input: valid frame (new) followed by oversized frame (reset).
+        let mut multi = Vec::with_capacity(valid_frame.len() + frame.len());
+        multi.extend_from_slice(&valid_frame);
+        multi.extend_from_slice(frame);
+        assert_too_big(
+            FrameDecoder::new().decode_all(&multi, &mut out).map(|_| ()),
+            expected,
+            &alloc::format!("multi-frame decode_all ({label})"),
+        );
+    }
+
+    // 3. StreamingDecoder paths.
+    for (label, frame, expected) in over_limit_cases {
+        assert_too_big(
+            StreamingDecoder::new(frame).map(|_| ()),
+            expected,
+            &alloc::format!("StreamingDecoder::new ({label})"),
+        );
+        assert_too_big(
+            StreamingDecoder::new_with_decoder(frame, FrameDecoder::new()).map(|_| ()),
+            expected,
+            &alloc::format!("StreamingDecoder::new_with_decoder fresh ({label})"),
+        );
+        let mut reused_for_stream = FrameDecoder::new();
+        assert_eq!(
+            reused_for_stream
+                .decode_all(&valid_frame, &mut out)
+                .unwrap(),
+            0
+        );
+        assert_too_big(
+            StreamingDecoder::new_with_decoder(frame, reused_for_stream).map(|_| ()),
+            expected,
+            &alloc::format!("StreamingDecoder::new_with_decoder reused ({label})"),
+        );
+    }
+
+    // 4. std oneshot helpers.
+    #[cfg(feature = "std")]
+    {
+        let assert_io_window_err = |res: std::io::Result<()>, expected_str: &str, ctx: &str| {
+            let err = res.expect_err(ctx);
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{ctx}: {err}");
+            let msg = std::format!("{err}");
+            assert!(
+                msg.contains("WindowSizeTooBig") && msg.contains(expected_str),
+                "{ctx}: unexpected message {msg}"
+            );
+        };
+
+        for (label, frame, expected) in over_limit_cases {
+            let expected_str = alloc::format!("{expected}");
+            assert_io_window_err(
+                crate::stream::decode_all(frame).map(|_| ()),
+                &expected_str,
+                &alloc::format!("stream::decode_all ({label})"),
+            );
+            assert_io_window_err(
+                crate::stream::decode_all_with_max(frame, Some(1024)).map(|_| ()),
+                &expected_str,
+                &alloc::format!("stream::decode_all_with_max ({label})"),
+            );
+            assert_io_window_err(
+                crate::stream::decode_all_unbounded(frame).map(|_| ()),
+                &expected_str,
+                &alloc::format!("stream::decode_all_unbounded ({label})"),
+            );
+            let mut sink = Vec::new();
+            assert_io_window_err(
+                crate::stream::copy_decode(frame, &mut sink),
+                &expected_str,
+                &alloc::format!("stream::copy_decode ({label})"),
+            );
+            assert_io_window_err(
+                crate::stream::copy_decode_with_max(frame, &mut sink, Some(1024)),
+                &expected_str,
+                &alloc::format!("stream::copy_decode_with_max ({label})"),
+            );
+            assert_io_window_err(
+                crate::stream::copy_decode_unbounded(frame, &mut sink),
+                &expected_str,
+                &alloc::format!("stream::copy_decode_unbounded ({label})"),
+            );
+        }
+    }
+}

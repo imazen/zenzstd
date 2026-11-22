@@ -15,8 +15,9 @@ use alloc::vec::Vec;
 use core::convert::TryInto;
 
 /// While the maximum window size allowed by the spec is significantly larger,
-/// our implementation limits it to 100mb to protect against malformed frames.
-const MAXIMUM_ALLOWED_WINDOW_SIZE: u64 = 1024 * 1024 * 100;
+/// our implementation limits it to 128 MiB (matching libzstd's
+/// `ZSTD_WINDOWLOG_LIMIT_DEFAULT` / `1 << 27`) to protect against malformed frames.
+const MAXIMUM_ALLOWED_WINDOW_SIZE: u64 = 1024 * 1024 * 128;
 
 /// Low level Zstandard decoder that can be used to decompress frames with fine control over when and how many bytes are decoded.
 ///
@@ -92,10 +93,24 @@ pub enum BlockDecodingStrategy {
     UptoBytes(usize),
 }
 
+fn read_header_within_window_limit(
+    source: impl Read,
+) -> Result<(frame::FrameHeader, u8, u64), FrameDecoderError> {
+    let (frame_header, header_size) = frame::read_frame_header(source)?;
+    let window_size = frame_header.window_size()?;
+
+    if window_size > MAXIMUM_ALLOWED_WINDOW_SIZE {
+        return Err(FrameDecoderError::WindowSizeTooBig {
+            requested: window_size,
+        });
+    }
+
+    Ok((frame_header, header_size, window_size))
+}
+
 impl FrameDecoderState {
     pub fn new(source: impl Read) -> Result<FrameDecoderState, FrameDecoderError> {
-        let (frame, header_size) = frame::read_frame_header(source)?;
-        let window_size = frame.window_size()?;
+        let (frame, header_size, window_size) = read_header_within_window_limit(source)?;
         #[allow(unused_mut)]
         let mut decoder_scratch = DecoderScratch::new(window_size as usize);
         #[cfg(feature = "hash")]
@@ -114,14 +129,7 @@ impl FrameDecoderState {
     }
 
     pub fn reset(&mut self, source: impl Read) -> Result<(), FrameDecoderError> {
-        let (frame_header, header_size) = frame::read_frame_header(source)?;
-        let window_size = frame_header.window_size()?;
-
-        if window_size > MAXIMUM_ALLOWED_WINDOW_SIZE {
-            return Err(FrameDecoderError::WindowSizeTooBig {
-                requested: window_size,
-            });
-        }
+        let (frame_header, header_size, window_size) = read_header_within_window_limit(source)?;
 
         self.frame_header = frame_header;
         self.frame_finished = false;

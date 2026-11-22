@@ -50,7 +50,7 @@ pub struct StreamingDecoder<READ: Read, DEC: BorrowMut<FrameDecoder>> {
     /// unbounded memory.
     ///
     /// `None` means no cap (legacy behavior). Set via [`Self::set_max_output_size`].
-    /// The 100 MiB internal window cap (see [`crate::common::MAX_WINDOW_SIZE`])
+    /// The 128 MiB internal window cap (see [`crate::common::MAX_WINDOW_SIZE`])
     /// protects ring-buffer state but **not** the caller's output `Vec`, so
     /// untrusted input — chained RLE blocks reaching petabyte-scale logical
     /// output from a few KB of compressed bytes — must always set a cap.
@@ -137,7 +137,7 @@ impl<READ: Read, DEC: BorrowMut<FrameDecoder>> StreamingDecoder<READ, DEC> {
     ///
     /// This protects against zstd "decompression bombs" where a small
     /// compressed payload (e.g. chained RLE blocks) expands to gigabytes or
-    /// terabytes of output. The internal 100 MiB window cap protects ring-buffer
+    /// terabytes of output. The internal 128 MiB window cap protects ring-buffer
     /// state but **not** the caller's destination buffer.
     ///
     /// Pass `None` to remove the cap (use only when the source is fully trusted).
